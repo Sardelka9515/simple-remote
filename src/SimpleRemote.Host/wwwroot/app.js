@@ -179,7 +179,10 @@
   const TAP_MS = 250;
   const TAP_SLOP = 12;
   const DOUBLE_TAP_MS = 300;
-  const WHEEL_PER_PX = 2;
+  // Wheel units per CSS pixel of finger travel. One notch is 120 units, so 4 means a 30px drag
+  // is one notch and a full pad swipe is roughly a screenful - phone users expect content to keep
+  // up with the finger, and the 1:1 mapping a lower value gives reads as sluggish.
+  const WHEEL_PER_PX = 4;
 
   function padPoint(event) {
     return { x: event.clientX, y: event.clientY, t: event.timeStamp };
@@ -235,8 +238,9 @@
       // Two fingers scroll. Only the primary pointer drives it - averaging every contact makes a
       // slight pinch read as scroll jitter.
       if (event.isPrimary) {
-        const units = dy * WHEEL_PER_PX * P.scrollSpeed * (P.naturalScroll ? 1 : -1);
-        const unitsX = dx * WHEEL_PER_PX * P.scrollSpeed * (P.naturalScroll ? -1 : 1);
+        const factor = WHEEL_PER_PX * P.scrollSpeed * speedScale;
+        const units = dy * factor * (P.naturalScroll ? 1 : -1);
+        const unitsX = dx * factor * (P.naturalScroll ? -1 : 1);
         link.scrollBy(unitsX, units);
         scrollVelocity = units / dt;
       }
@@ -334,8 +338,9 @@
 
     let velocity = scrollVelocity * 16; // per frame rather than per ms
     const step = () => {
-      velocity *= 0.94;
-      if (Math.abs(velocity) < 1) { momentumHandle = null; return; }
+      // 0.96 coasts for roughly a second, which is what makes a flick feel like it carries.
+      velocity *= 0.96;
+      if (Math.abs(velocity) < 2) { momentumHandle = null; return; }
       link.scrollBy(0, velocity);
       momentumHandle = requestAnimationFrame(step);
     };
@@ -347,6 +352,18 @@
     momentumHandle = null;
     scrollVelocity = 0;
   }
+
+  // Speed slider. Applies live to both cursor and scroll, since a user who finds one sluggish
+  // almost always finds the other sluggish too.
+  const speedInput = $('speed');
+  speedInput.value = String(Math.round(speedScale * 100));
+  $('speedval').textContent = Math.round(speedScale * 100) + '%';
+
+  speedInput.addEventListener('input', () => {
+    speedScale = Number(speedInput.value) / 100;
+    $('speedval').textContent = Math.round(speedScale * 100) + '%';
+    try { localStorage.setItem('simpleremote.speed', String(speedScale)); } catch (err) { /* private mode */ }
+  });
 
   for (const button of document.querySelectorAll('.mb')) {
     const code = Number(button.dataset.btn);

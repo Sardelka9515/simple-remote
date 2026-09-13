@@ -34,6 +34,13 @@
       <button class="mb narrow" data-btn="2">Mid</button>
       <button class="mb" data-btn="1">Right</button>
     </div>
+    <!-- Feel is subjective and device-specific, so it is tunable here rather than only in
+         config.json on the PC. Saved per device. -->
+    <div class="speed-row">
+      <span class="speed-label">Speed</span>
+      <input id="speed" class="vol" type="range" min="25" max="300" step="5" value="100">
+      <span id="speedval" class="volval">100%</span>
+    </div>
   </section>
 
   <!-- Keyboard -->

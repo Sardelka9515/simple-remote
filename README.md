@@ -73,8 +73,8 @@ Only SHA-256 hashes of device tokens are stored, in
 {
   "port": 8787,
   "pointer": {
-    "sensitivity": 1.0,
-    "acceleration": 0.5,
+    "sensitivity": 0.55,
+    "acceleration": 0.4,
     "maxSpeed": 3.0,
     "scrollSpeed": 1.0,
     "naturalScroll": true
@@ -94,14 +94,33 @@ failing silently when tapped.
 
 ### Pointer feel
 
-Deltas are accelerated **on the phone**, where the true event timestamps are, using
-`gain = sensitivity × (1 + acceleration × min(speed, maxSpeed))`.
+**If the cursor feels too slow or too fast, use the Speed slider under the trackpad.** It applies
+live to both cursor and scrolling, and is saved per device — a tablet and a phone driving the same
+PC can each have their own setting. That is the intended way to tune feel; the config file below
+only moves the centre point of the slider's range.
 
-The defaults are deliberately gentle because Windows applies **its own** acceleration to relative
-mouse input when *Enhance pointer precision* is enabled — which it is by default, and which
-measures at roughly 2.2× on top of whatever the phone sends. If you turn that Windows setting off
-(Settings → Bluetooth & devices → Mouse → Additional mouse settings → Pointer Options), this curve
-becomes the only one in play and you can raise `sensitivity` and `acceleration` considerably.
+Under the slider, deltas are accelerated **on the phone**, where the true event timestamps are:
+
+```
+gain = (screenDiagonal / padDiagonal) × sensitivity × speedSlider
+     × (1 + acceleration × min(fingerSpeed, maxSpeed))
+```
+
+The base is **screen-relative**: the host reports its virtual desktop size, and the client divides
+by the trackpad's own diagonal. This is what makes one sensitivity value feel the same on a laptop
+panel and a 4K desktop — a fixed gain is necessarily wrong on most hardware, and was the original
+cause of a sluggish cursor. The ratio is taken on the diagonal so the gain stays a single scalar:
+separate x and y factors would skew diagonal movement.
+
+Two things worth knowing:
+
+- Windows applies **its own** acceleration to relative mouse input when *Enhance pointer precision*
+  is enabled, which it is by default — measured at roughly 2.2× on top of whatever the phone sends.
+  Turning it off (Settings → Bluetooth & devices → Mouse → Additional mouse settings → Pointer
+  Options) makes this curve the only one in play and the feel much more predictable, at which point
+  `sensitivity` wants raising.
+- Sub-pixel motion is accumulated rather than truncated, so slow, precise drags are not lost to
+  rounding.
 
 ## Why it feels responsive
 
@@ -153,8 +172,12 @@ WSL, Docker or a VPN have several plausible-looking addresses, and only one of t
 your phone is on. Simple Remote ranks real Wi-Fi and Ethernet adapters above virtual ones, but if
 the guess is wrong, pick the right one from the dropdown.
 
-**The cursor moves too fast or too slowly.** See *Pointer feel* above; the Windows setting matters
-as much as the config file.
+**The cursor or scrolling moves too fast or too slowly.** Use the Speed slider under the trackpad
+— it covers 25% to 300% and takes effect immediately. If even 300% is not enough, raise
+`pointer.sensitivity` in `config.json`, and see *Pointer feel* above: the Windows *Enhance pointer
+precision* setting matters as much as anything in the config file.
+
+**Scrolling moves the wrong way.** Set `pointer.naturalScroll` to `false`.
 
 **Media buttons do nothing in some app.** Apps that do not register with the Windows media session
 still usually honour hardware media keys, which is what Simple Remote falls back to. Apps that
