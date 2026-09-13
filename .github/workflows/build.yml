@@ -1,51 +1,91 @@
-name: Native AOT Build
+name: Build
+
+# Continuous integration only. Releases and version bumps are handled by release-please.yml, so
+# this workflow deliberately does not create releases or react to tags - two things publishing to
+# the same release would race each other.
 
 on:
   push:
-    branches: [ master, main ]
-    tags: [ 'v*' ]
+    branches: [master, main]
   pull_request:
-    branches: [ master, main ]
+    branches: [master, main]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
-    name: Build & Publish Native AOT (win-x64)
+    name: Test and publish all flavours (win-x64)
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup .NET SDK
-        uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-          dotnet-quality: 'preview'
 
-      - name: Restore dependencies
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Restore
         run: dotnet restore SimpleRemote.slnx
 
-      - name: Run unit tests
-        run: dotnet test --no-restore -c Release
+      - name: Unit tests
+        run: dotnet test tests/SimpleRemote.Tests/SimpleRemote.Tests.csproj -c Release --no-restore --nologo
+
+      # Drives the real client code under a DOM stub and asserts the exact button events each
+      # gesture emits. Cheap, and it catches the class of bug where a drag turns into a double click.
+      - name: Client gesture tests
+        run: node tests/client/gestures.js
+
+      # Separate artifacts path per flavour: shared intermediates let a self-contained publish leave
+      # runtime assemblies that the next single-file publish bundles, quietly inflating a 26 MB
+      # framework-dependent build to 163 MB. BaseIntermediateOutputPath does NOT work for this -
+      # the default obj/ stops being excluded from the compile glob and AssemblyInfo is duplicated.
+      - name: Publish framework-dependent
+        run: >
+          dotnet publish src/SimpleRemote.Host -c Release -r win-x64
+          -p:SelfContained=false
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:DebugType=none
+          --artifacts-path artifacts/fx
+          -o out/framework-dependent
+
+      - name: Publish self-contained
+        run: >
+          dotnet publish src/SimpleRemote.Host -c Release -r win-x64
+          -p:SelfContained=true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:DebugType=none
+          --artifacts-path artifacts/sc
+          -o out/self-contained
 
       - name: Publish Native AOT
-        run: dotnet publish src/SimpleRemote.Host -c Release -r win-x64 -p:PublishAot=true -o publish
+        run: >
+          dotnet publish src/SimpleRemote.Host -c Release -r win-x64
+          -p:PublishAot=true
+          -p:DebugType=none
+          --artifacts-path artifacts/aot
+          -o out/native-aot
 
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+      - name: Report sizes
+        shell: pwsh
+        run: |
+          foreach ($flavour in 'native-aot', 'framework-dependent', 'self-contained') {
+            $exe = Get-Item "out/$flavour/SimpleRemote.exe"
+            "{0,-22} {1} MB" -f $flavour, [math]::Round($exe.Length / 1MB, 1)
+          }
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: SimpleRemote-win-x64-nativeaot
-          path: publish/SimpleRemote.exe
+          name: SimpleRemote-win-x64
+          path: |
+            out/native-aot/SimpleRemote.exe
+            out/framework-dependent/SimpleRemote.exe
+            out/self-contained/SimpleRemote.exe
           if-no-files-found: error
-
-      - name: Create Release and upload assets
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: publish/SimpleRemote.exe
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

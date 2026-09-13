@@ -1,0 +1,104 @@
+name: Release
+
+# release-please owns versioning and releases. It keeps a "chore(release)" pull request open that
+# accumulates the changelog; merging that PR tags the release, and only then are binaries built and
+# attached. Releases therefore require Conventional Commit subjects (feat:, fix:, ...) - a commit
+# that follows no convention is not releasable and will not appear in the changelog.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  publish:
+    name: Build and attach binaries
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Test
+        run: dotnet test tests/SimpleRemote.Tests/SimpleRemote.Tests.csproj -c Release --nologo
+
+      - name: Client gesture tests
+        run: node tests/client/gestures.js
+
+      # Each flavour gets its own artifacts path. Sharing intermediates lets a previous
+      # self-contained publish leave runtime assemblies behind that the next single-file publish
+      # bundles, silently turning a 26 MB framework-dependent build into a 163 MB one. Note that
+      # BaseIntermediateOutputPath does NOT work here: the default obj/ stops being excluded from
+      # the compile glob and generated AssemblyInfo files get compiled twice.
+      - name: Publish framework-dependent
+        run: >
+          dotnet publish src/SimpleRemote.Host -c Release -r win-x64
+          -p:SelfContained=false
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:DebugType=none
+          --artifacts-path artifacts/fx
+          -o out/framework-dependent
+
+      - name: Publish self-contained
+        run: >
+          dotnet publish src/SimpleRemote.Host -c Release -r win-x64
+          -p:SelfContained=true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:DebugType=none
+          --artifacts-path artifacts/sc
+          -o out/self-contained
+
+      - name: Publish Native AOT
+        run: >
+          dotnet publish src/SimpleRemote.Host -c Release -r win-x64
+          -p:PublishAot=true
+          -p:DebugType=none
+          --artifacts-path artifacts/aot
+          -o out/native-aot
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $tag = '${{ needs.release-please.outputs.tag_name }}'
+          New-Item -ItemType Directory -Force dist | Out-Null
+
+          foreach ($flavour in 'native-aot', 'framework-dependent', 'self-contained') {
+            $exe = "out/$flavour/SimpleRemote.exe"
+            if (-not (Test-Path $exe)) { throw "missing build output: $exe" }
+            Compress-Archive -Path $exe -DestinationPath "dist/SimpleRemote-$tag-win-x64-$flavour.zip" -Force
+          }
+
+          Get-ChildItem dist | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}} | Format-Table
+
+      - name: Attach to release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload '${{ needs.release-please.outputs.tag_name }}' (Get-ChildItem dist/*.zip).FullName --clobber

@@ -32,25 +32,78 @@ Windows 10 version 1903 or newer. Nothing to install on the phone.
 dotnet run --project src/SimpleRemote.Host
 ```
 
-Publish a Native AOT binary (instant startup, pure native machine code, ~33 MB standalone executable):
+### Publishing
+
+Three flavours, all a single `SimpleRemote.exe` — the web UI is embedded in the executable, so
+there is genuinely nothing beside it to copy.
+
+| Flavour | Size | Memory | Needs .NET installed | Build needs |
+|---|---|---|---|---|
+| **Native AOT** | 31 MB | ~43 MB | no | MSVC linker |
+| **Framework-dependent** | 26 MB | ~75 MB | yes | nothing extra |
+| **Self-contained** | 163 MB | ~75 MB | no | nothing extra |
+
+**Native AOT** — smallest standalone option and the lowest memory use, with no JIT warm-up:
 
 ```bash
-dotnet publish src/SimpleRemote.Host -c Release -r win-x64 -p:PublishAot=true -o publish
+dotnet publish src/SimpleRemote.Host -c Release -r win-x64 -p:PublishAot=true -p:DebugType=none --artifacts-path artifacts/aot -o out/native-aot
 ```
 
-Alternatively, publish as a single-file trimmed app:
+**Framework-dependent** — smallest download, but the target machine needs the .NET 10 Desktop and
+ASP.NET Core runtimes:
 
 ```bash
-dotnet publish src/SimpleRemote.Host -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
+dotnet publish src/SimpleRemote.Host -c Release -r win-x64 -p:SelfContained=false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=none --artifacts-path artifacts/fx -o out/framework-dependent
 ```
 
-The web UI is compiled into the executable as embedded resources, so there is genuinely nothing beside it to copy. If the target machine already has the .NET 10 runtime, drop `--self-contained true` for a ~2 MB executable instead.
-
-Run the tests:
+**Self-contained** — bundles the whole runtime; use it when AOT cannot be built and the target has
+no .NET:
 
 ```bash
-dotnet test
+dotnet publish src/SimpleRemote.Host -c Release -r win-x64 -p:SelfContained=true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=none --artifacts-path artifacts/sc -o out/self-contained
 ```
+
+Three non-obvious things about those command lines, each of which produces a silently wrong build
+rather than an error:
+
+- **`-p:SelfContained=false`, not `--self-contained false`.** The CLI flag is overridden when it
+  appears *after* a `-p:` argument, so `-p:PublishSingleFile=true --self-contained false` quietly
+  publishes self-contained — a 163 MB "framework-dependent" build. The explicit property is
+  order-independent.
+- **`--artifacts-path` must differ per flavour.** Sharing intermediates lets a self-contained
+  publish leave runtime assemblies behind that the next single-file publish bundles, again giving
+  163 MB. `BaseIntermediateOutputPath` does *not* work for this: the default `obj/` stops being
+  excluded from the compile glob and the generated `AssemblyInfo.cs` files get compiled twice.
+- **AOT needs `vswhere.exe` on `PATH`** (`C:\Program Files (x86)\Microsoft Visual Studio\Installer`)
+  so ILC can locate the MSVC linker. Without it the native link step fails *after* a full
+  compile, with a confusing message about `vswhere` not being recognised. GitHub's
+  `windows-latest` runners already have it.
+
+### Tests
+
+```bash
+dotnet test                       # host: codec, pairing, key parsing, config migration
+node tests/client/gestures.js     # client: gesture -> button event sequences
+```
+
+The client tests load the real `protocol.js` and `app.js` under a DOM stub, feed synthetic pointer
+events into the actual handlers, and decode the binary frames that come out — so they assert the
+exact button sequence each gesture emits, which is the difference between a drag and an accidental
+double click.
+
+### Releases
+
+Versioning and releases are automated with
+[release-please](https://github.com/googleapis/release-please). Merging to `master` keeps a
+`chore(release)` pull request open that accumulates the changelog; merging *that* tags the release
+and attaches all three binaries.
+
+This only works with [Conventional Commit](https://www.conventionalcommits.org/) subjects — `feat:`
+bumps the minor version, `fix:` the patch, and `feat!:` or a `BREAKING CHANGE:` footer the major.
+A commit that follows no convention is not releasable and will not appear in the changelog.
+
+The version lives in `SimpleRemote.Host.csproj` next to an `x-release-please-version` marker
+comment; removing that comment silently stops the version tracking releases.
 
 ## How pairing works
 

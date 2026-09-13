@@ -1,6 +1,12 @@
 bin/
 obj/
 *.user
+/.vs/SimpleRemote.slnx
+
+# publish and packaging output
 publish/
 publish-aot/
-/.vs/SimpleRemote.slnx
+publish-fx/
+out/
+dist/
+artifacts/
