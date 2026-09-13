@@ -10,7 +10,7 @@
 
     <!-- Bumped automatically by release-please; the trailing marker is what it looks for, so do
          not remove it or the version will silently stop tracking releases. -->
-    <Version>0.1.0</Version> <!-- x-release-please-version -->
+    <Version>0.2.0</Version> <!-- x-release-please-version -->
     <Product>Simple Remote</Product>
     <Company>Simple Remote</Company>
     <Description>Phone-as-remote-control for Windows: keyboard, mouse and media over the LAN.</Description>
