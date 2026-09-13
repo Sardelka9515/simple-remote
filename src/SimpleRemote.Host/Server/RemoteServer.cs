@@ -142,6 +142,7 @@ public sealed class RemoteServer : IDisposable
         return new ConfigMessage
         {
             Shortcuts = Shortcuts.Describe(),
+            Layouts = Shortcuts.DescribeLayouts(),
             Pointer = new PointerInfo
             {
                 Sensitivity = Config.Current.Pointer.Sensitivity,

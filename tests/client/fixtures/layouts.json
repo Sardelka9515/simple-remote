@@ -1,0 +1,87 @@
+[
+  {
+    "id": "netflix",
+    "label": "Netflix",
+    "icon": "film",
+    "rows": [
+      {
+        "fill": false,
+        "controls": [
+          {
+            "type": "button",
+            "label": "Skip intro",
+            "icon": "skip",
+            "accent": true,
+            "span": 1,
+            "actionId": "layout:netflix:0:0",
+            "trackButtons": true,
+            "artwork": true
+          }
+        ]
+      },
+      {
+        "fill": false,
+        "controls": [
+          {
+            "type": "media",
+            "accent": false,
+            "span": 1,
+            "seekBackwardId": "layout:netflix:1:0:back",
+            "seekForwardId": "layout:netflix:1:0:forward",
+            "trackButtons": false,
+            "artwork": false
+          }
+        ]
+      },
+      {
+        "fill": false,
+        "controls": [
+          {
+            "type": "volume",
+            "accent": false,
+            "span": 1,
+            "trackButtons": true,
+            "artwork": true
+          }
+        ]
+      },
+      {
+        "fill": true,
+        "controls": [
+          {
+            "type": "trackpad",
+            "accent": false,
+            "span": 1,
+            "trackButtons": true,
+            "artwork": true
+          }
+        ]
+      },
+      {
+        "fill": false,
+        "controls": [
+          {
+            "type": "button",
+            "label": "Back",
+            "icon": "back",
+            "accent": false,
+            "span": 1,
+            "actionId": "layout:netflix:4:0",
+            "trackButtons": true,
+            "artwork": true
+          },
+          {
+            "type": "button",
+            "label": "Fullscreen",
+            "icon": "fullscreen",
+            "accent": false,
+            "span": 1,
+            "actionId": "layout:netflix:4:1",
+            "trackButtons": true,
+            "artwork": true
+          }
+        ]
+      }
+    ]
+  }
+]

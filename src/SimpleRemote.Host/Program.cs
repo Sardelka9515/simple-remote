@@ -38,7 +38,7 @@ internal static class Program
         var media = new MediaController(injector);
         var volume = new VolumeController();
         var clipboard = new ClipboardService();
-        var shortcuts = new ShortcutService(config, injector);
+        var shortcuts = new ShortcutService(config, injector, media);
 
         shortcuts.Reload();
         volume.Initialize();

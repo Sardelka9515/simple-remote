@@ -16,8 +16,8 @@ Phone browser  ──WebSocket──►  Kestrel  ──►  receive loop  ─�
 
 | | |
 |---|---|
-| **Trackpad** | Drag to move, tap to click, two-finger tap for right click, two-finger drag to scroll with momentum, tap-and-a-half to drag. Dedicated L/M/R buttons. |
-| **Keyboard** | Type with the phone keyboard (Unicode, so emoji and any layout work), plus arrows, function keys, and latching Ctrl/Alt/Shift/Win for real shortcuts. |
+| **Trackpad** | Drag to move, tap to click, two-finger tap for right click, two-finger drag to scroll with momentum, tap-and-a-half to drag. A scroll strip down the right edge scrolls with one thumb. Dedicated L/M/R buttons. |
+| **Keyboard** | Opening the tab raises the phone keyboard straight away. Type in any language (Unicode, so emoji and any layout work), plus arrows, function keys, and latching Ctrl/Alt/Shift/Win for real shortcuts. |
 | **Media** | Now-playing title, artist and album art from whatever is playing, with transport controls, a scrub bar, and a system volume slider. |
 | **Shortcuts** | Your own buttons — key combos or app/URL launches — defined in `config.json`. |
 | **Clipboard** | Push text to the PC clipboard and pull it back. |
@@ -83,8 +83,14 @@ rather than an error:
 
 ```bash
 dotnet test                       # host: codec, pairing, key parsing, config migration
-node tests/client/gestures.js     # client: gesture -> button event sequences
+node tests/client/gestures.js     # client: gestures, layouts, media panel, icons
 ```
+
+The client tests render layouts from `tests/client/fixtures/layouts.json`, and a host test fails if
+that file differs from what the host actually sends — so the client is never tested against a
+layout nobody ships. After deliberately changing a bundled layout, regenerate it with
+`UPDATE_FIXTURES=1 dotnet test` and commit the result (and bump the config version, or existing
+installs keep the old layout).
 
 The client tests load the real `protocol.js` and `app.js` under a DOM stub, feed synthetic pointer
 events into the actual handlers, and decode the binary frames that come out — so they assert the
@@ -146,9 +152,83 @@ Only SHA-256 hashes of device tokens are stored, in
 }
 ```
 
-Shortcut actions are either `keys` (a combo such as `Ctrl+Shift+Esc`, `Win+P`, `MediaPlayPause`) or
-`launch` (a path, document or URL). A combo that fails to parse is dropped at startup rather than
-failing silently when tapped.
+Shortcut actions are `keys` (a combo such as `Ctrl+Shift+Esc`, `Win+P`, `MediaPlayPause`), `launch`
+(a path, document or URL), or `media` (`play`, `pause`, `playpause`, `next`, `prev`, `stop`). A
+`keys` action may set `"repeat": n` to fire the combo several times, which is how you drive an app
+that only seeks a fixed step per keypress. Anything that fails to compile is dropped at startup,
+with the reason recorded, rather than failing silently the first time it is tapped.
+
+## Custom layouts
+
+A layout is a control page declared in `config.json` and rendered generically by the phone, so
+**adding a page for a new app needs no code on either side**:
+
+```json
+"layouts": [
+  {
+    "id": "netflix",
+    "label": "Netflix",
+    "icon": "film",
+    "rows": [
+      { "controls": [
+        { "type": "button", "label": "Skip intro", "icon": "skip", "accent": true,
+          "action": { "type": "keys", "target": "S" } }
+      ] },
+      { "controls": [
+        { "type": "media", "trackButtons": false, "artwork": false,
+          "seekBackward": { "type": "keys", "target": "Left" },
+          "seekForward": { "type": "keys", "target": "Right" } }
+      ] },
+      { "controls": [{ "type": "volume" }] },
+      { "fill": true, "controls": [{ "type": "trackpad" }] }
+    ]
+  }
+]
+```
+
+Each layout becomes its own tab. Rows lay out left to right; the one row with `"fill": true` takes
+whatever vertical space the fixed rows leave, which is normally the trackpad.
+
+| Control type | What it is |
+|---|---|
+| `button` | Runs an `action` (same shapes as a shortcut). `accent` draws it as the primary action, `span` makes it wider than its siblings. |
+| `trackpad` | A full trackpad, driven by the same gesture engine as the Touchpad tab — tap, drag, two-finger scroll, tap-and-a-half and the one-thumb scroll strip all behave identically. |
+| `media` | The Media tab's now-playing panel — artwork, title, scrub bar, play/pause — painted by the same code. Optional `seekBackward` / `seekForward` actions add rewind and fast-forward buttons; `trackButtons: false` hides previous/next, `artwork: false` hides the thumbnail. |
+| `volume` | System volume slider and mute, kept in step with the Media tab and with the PC. |
+| `mouse` | Left / Middle / Right buttons. |
+| `label`, `spacer` | Static text, and flexible empty space. |
+
+**Icons** are either a name from the built-in set — `play`, `pause`, `prev`, `next`, `rewind`,
+`forward`, `skip`, `back`, `fullscreen`, `film`, `grid` — which render as SVG, or any other text,
+such as an emoji. Prefer the names: Unicode symbols like ⛶ or ⏭ look like a free icon set but depend
+on the fonts installed on the phone, and many Android builds show an empty box for them.
+
+Two deliberate properties: a control type the phone does not recognise is **skipped** rather than
+breaking the page, so an older phone stays usable against a newer host; and layout action ids are
+derived from the control's position, so they stay stable across restarts and can never collide with
+a shortcut id.
+
+### The bundled Netflix layout
+
+Skip intro · now-playing panel with ↺ 10 s / play-pause / 10 s ↻ · Volume · Trackpad · Back ·
+Fullscreen.
+
+Every button uses a shortcut the Netflix web player actually honours: `S` skips the intro, the
+arrow keys seek 10 seconds, `F` toggles fullscreen, and Back is the browser back key. The middle of
+the page is the same now-playing panel as the Media tab, so title, artwork, position and play/pause
+state come from the Windows media session, and play/pause is a real session command rather than the
+space bar — it cannot drift out of step with what is on screen.
+
+Previous/next track and the artwork thumbnail are deliberately hidden: for Netflix the track
+buttons jump episodes, which is too easy to hit by accident, and the "artwork" of a video is usually
+an arbitrary frame that costs trackpad space. Everything here is plain config, so any of it can be changed.
+
+Keys are delivered to whichever window has focus on the PC, so the Netflix tab needs to be the
+focused window for Skip intro, seeking and fullscreen to reach it.
+
+Upgrading from an earlier build replaces a previously saved Netflix layout with this one (config
+version 4). Layouts you added yourself are untouched, and if you deleted the Netflix layout it stays
+deleted.
 
 ### Pointer feel
 
@@ -272,6 +352,12 @@ with 1-unit granularity, that is what makes it track the finger instead of lurch
 Fling momentum uses the same windowed velocity as the cursor, so identical flicks coast the same
 distance — an event-pair estimate could report an absurd velocity from one 1 ms sample and launch
 the view across the document.
+
+Holding the phone in one hand makes two-finger scroll awkward, so every trackpad has a **scroll
+strip** down its right edge: drag a thumb up or down it to scroll. It feeds the same interpolated
+path and momentum as two-finger scroll, uses the same direction setting, and only ever scrolls
+vertically — a thumb never travels in a perfectly straight line, and letting that drift through
+would produce stray sideways scrolling.
 
 If some older application integer-divides the wheel delta by 120 and so never scrolls at all, set
 `pointer.smoothScroll` to `false` to get the quantised behaviour back.

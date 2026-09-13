@@ -15,26 +15,42 @@ const path = require('path');
 
 const ROOT = process.argv[2] || path.join(__dirname, '..', '..', 'src', 'SimpleRemote.Host', 'wwwroot');
 
+// The exact layouts the host sends. LayoutTests.ClientFixtureMatchesTheRealLayoutOutput fails if
+// this file drifts from the host, so these scenarios always exercise what actually ships.
+const FIXTURE_LAYOUTS = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'layouts.json'), 'utf8'));
+
+// One control type no client knows, to prove unknown types are skipped rather than breaking a page.
+FIXTURE_LAYOUTS[0].rows[FIXTURE_LAYOUTS[0].rows.length - 1].controls.push({ type: 'whatever-is-new', label: 'Future' });
+
 // ---------------------------------------------------------------- DOM stub
 
-function makeElement(id) {
+// Every element ever created, so querySelectorAll can be a flat filter instead of a tree walk.
+const allElements = [];
+
+function makeElement(id, tag) {
   const listeners = new Map();
+  const classes = new Set();
+
   const el = {
     id,
+    tagName: (tag || 'div').toUpperCase(),
     dataset: {},
     style: {},
     textContent: '',
     innerHTML: '',
     value: '',
+    type: '',
+    min: '', max: '', step: '',
     hidden: false,
     disabled: false,
     firstChild: { textContent: '' },
+    childNodes: [],
+    _detached: false,
     classList: {
-      _set: new Set(),
-      add(...c) { c.forEach((x) => this._set.add(x)); },
-      remove(...c) { c.forEach((x) => this._set.delete(x)); },
-      toggle(c, on) { if (on) this._set.add(c); else this._set.delete(c); },
-      contains(c) { return this._set.has(c); },
+      add(...c) { c.forEach((x) => classes.add(x)); },
+      remove(...c) { c.forEach((x) => classes.delete(x)); },
+      toggle(c, on) { if (on) classes.add(c); else classes.delete(c); },
+      contains(c) { return classes.has(c); },
     },
     addEventListener(type, fn) {
       if (!listeners.has(type)) listeners.set(type, []);
@@ -42,20 +58,46 @@ function makeElement(id) {
     },
     removeEventListener() {},
     dispatch(type, ev) {
-      const fns = listeners.get(type) || [];
-      for (const fn of fns) fn(ev);
+      for (const fn of listeners.get(type) || []) fn(ev);
     },
     hasListener(type) { return (listeners.get(type) || []).length > 0; },
     removeAttribute() {},
     setAttribute() {},
     setPointerCapture() {},
     releasePointerCapture() {},
-    appendChild() {},
+    appendChild(child) { el.childNodes.push(child); return child; },
+    insertBefore(child) { el.childNodes.push(child); return child; },
+    remove() { el._detached = true; },
+    closest(sel) { return matches(el, sel) ? el : null; },
     getBoundingClientRect() { return { left: 10, top: 60, width: 355, height: 628, right: 365, bottom: 688 }; },
-    click() { el.dispatch('click', { preventDefault() {} }); },
+    click() { el.dispatch('click', { preventDefault() {}, target: el }); },
     focus() {},
   };
+
+  // className is how the app sets classes on created elements, so keep it and classList in step.
+  Object.defineProperty(el, 'className', {
+    get() { return [...classes].join(' '); },
+    set(v) { classes.clear(); String(v).split(/\s+/).filter(Boolean).forEach((c) => classes.add(c)); },
+  });
+
+  allElements.push(el);
   return el;
+}
+
+/** Supports the simple selectors the app actually uses: .a, .a.b, and .key[data-vk]. */
+function matches(el, selector) {
+  for (const part of selector.trim().split(',')) {
+    const sel = part.trim();
+    if (!sel) continue;
+
+    const attr = /\[data-vk\]$/.test(sel);
+    const classNames = sel.replace(/\[data-vk\]$/, '').split('.').filter(Boolean);
+
+    if (classNames.every((c) => el.classList.contains(c)) && (!attr || el.dataset.vk !== undefined)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 const elements = new Map();
@@ -80,14 +122,11 @@ const documentStub = {
     return makeElement('q');
   },
   querySelectorAll: (sel) => {
-    if (sel === '.tab') return [];
-    if (sel === '.mb') return [];
-    if (sel === '.mod') return [];
     if (sel === '.key[data-vk]') return keyStubs;
-    if (sel === '.page') return [];
-    return [];
+    return allElements.filter((e) => !e._detached && matches(e, sel));
   },
-  createElement: () => makeElement('created'),
+  createElement: (tag) => makeElement('created', tag),
+  createTextNode: (text) => ({ textContent: String(text), nodeType: 3 }),
   addEventListener(type, fn) {
     if (!this._listeners.has(type)) this._listeners.set(type, []);
     this._listeners.get(type).push(fn);
@@ -123,6 +162,7 @@ class FakeWebSocket {
             t: 'config',
             hostName: 'TEST',
             shortcuts: [],
+            layouts: FIXTURE_LAYOUTS,
             pointer: { sensitivity: 0.55, acceleration: 0.4, maxSpeed: 3, scrollSpeed: 1,
                        naturalScroll: true, tapHoldMs: 200, screenWidth: 1920, screenHeight: 1080 },
           }) });
@@ -297,6 +337,138 @@ async function main() {
   pointer('pointerup', 100, 300, { pointerId: 1, isPrimary: true });
   pumpFrames(1);
   results.push(['two-finger tap', buttons(decode(sent)), 'expect 1v 1^', '']);
+
+  // ---- layout rendering -------------------------------------------------------
+
+  // 6. The Netflix layout became a tab and a page, built purely from the host description.
+  const layoutTabs = documentStub.querySelectorAll('.layout-tab');
+  const layoutPages = documentStub.querySelectorAll('.layout-page');
+  results.push(['layout tab + page',
+    `${layoutTabs.length}/${layoutPages.length}`, 'expect 1/1',
+    layoutTabs.length ? 'page=' + layoutPages[0].dataset.page : '']);
+
+  // 7. Every control type rendered, and the unknown one was skipped rather than breaking the page.
+  const lcButtons = documentStub.querySelectorAll('.lc-btn');
+  const lcVolume = documentStub.querySelectorAll('.lc-volume');
+  const lcMedia = documentStub.querySelectorAll('.lc-media');
+  const layoutPads = documentStub.querySelectorAll('.layout-pad');
+  results.push(['layout controls',
+    `btn=${lcButtons.length} media=${lcMedia.length} vol=${lcVolume.length} pad=${layoutPads.length}`,
+    'expect btn=3 media=1 vol=1 pad=1', 'unknown type skipped']);
+
+  // 8. A layout button sends the action id the host gave it.
+  reset();
+  const skip = lcButtons.find((b) => b.textContent === 'Skip intro' ||
+    b.childNodes.some((c) => c.textContent === 'Skip intro'));
+  if (skip) skip.click();
+  const skipSent = sent.filter((f) => f.kind === 'text').map((f) => JSON.parse(f.data));
+  results.push(['layout button action',
+    skipSent.length ? `${skipSent[0].t}:${skipSent[0].id}` : '(nothing)',
+    'expect shortcut:layout:netflix:0:0', '']);
+
+  // 9. The trackpad inside the layout drives the same gesture engine as the built-in one.
+  await new Promise((r) => setTimeout(r, 320));
+  reset();
+  const layoutPad = layoutPads[0];
+  if (layoutPad) {
+    const at = (type, x, y) => layoutPad.dispatch(type, {
+      pointerId: 31, isPrimary: true, pointerType: 'touch',
+      clientX: x, clientY: y, timeStamp: now, currentTarget: layoutPad,
+      preventDefault() {}, getCoalescedEvents: () => [],
+    });
+    at('pointerdown', 100, 300);
+    advance(60);
+    at('pointerup', 100, 300);
+    pumpFrames(1);
+    await new Promise((r) => setTimeout(r, 320));
+  }
+  results.push(['layout trackpad tap', buttons(decode(sent)), 'expect 0v 0^', '']);
+
+  // 10. The embedded media panel is the real component: it paints from mediaState exactly like the
+  //     Media tab, hides track buttons when asked, and its seek buttons run the host actions.
+  socket.onmessage({ data: JSON.stringify({
+    t: 'mediaState', active: true, title: 'Stranger Things', artist: 'S4 E1', app: 'firefox',
+    status: 'playing', positionMs: 60000, durationMs: 3000000,
+    canPrevious: true, canNext: true, canSeek: false,
+  }) });
+  const panel = lcMedia[0];
+  const findIn = (node, predicate) => {
+    if (!node) return null;
+    if (predicate(node)) return node;
+    for (const child of node.childNodes || []) {
+      const hit = findIn(child, predicate);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  const panelTitle = findIn(panel, (n) => n.classList && n.classList.contains('title'));
+  const tabTitle = byId('mtitle');
+  results.push(['media panel paints',
+    `${panelTitle ? panelTitle.textContent : '?'} | tab=${tabTitle.textContent}`,
+    'expect Stranger Things | tab=Stranger Things', '']);
+
+  const transportButtons = [];
+  (function collect(node) {
+    if (!node) return;
+    if (node.tagName === 'BUTTON' && node.classList && node.classList.contains('tbtn')) transportButtons.push(node.dataset.icon);
+    for (const child of node.childNodes || []) collect(child);
+  })(panel);
+  results.push(['media panel transport',
+    transportButtons.join(' '), 'expect rewind pause forward', 'track buttons hidden, state playing']);
+
+  const panelArt = findIn(panel, (n) => n.classList && n.classList.contains('art'));
+  results.push(['media panel artwork', panelArt ? 'shown' : 'hidden', 'expect hidden', '']);
+
+  // Every bundled icon must be a name the client can draw. A glyph or a mangled escape falls back to
+  // plain text, which is exactly how "U0001F3AC" ended up on the Netflix tab.
+  const tabIcon = documentStub.querySelectorAll('.layout-tab')[0].childNodes[0];
+  const buttonIcons = documentStub.querySelectorAll('.lc-icon').map((e) => e.dataset.icon || ('TEXT:' + e.textContent));
+  results.push(['layout icons are svg',
+    [tabIcon.dataset.icon || ('TEXT:' + tabIcon.textContent)].concat(buttonIcons).join(' '),
+    'expect film skip back fullscreen', '']);
+
+  reset();
+  const rewind = findIn(panel, (n) => n.tagName === 'BUTTON' && n.dataset.icon === 'rewind');
+  const forward = findIn(panel, (n) => n.tagName === 'BUTTON' && n.dataset.icon === 'forward');
+  if (rewind) rewind.click();
+  if (forward) forward.click();
+  const seekIds = sent.filter((f) => f.kind === 'text').map((f) => JSON.parse(f.data))
+    .filter((m) => m.t === 'shortcut').map((m) => m.id).join(' ');
+  results.push(['media seek buttons', seekIds,
+    'expect layout:netflix:1:0:back layout:netflix:1:0:forward', '']);
+
+  // 11. One-finger scroll strip: a vertical drag scrolls, and never moves the cursor or clicks.
+  await new Promise((r) => setTimeout(r, 320));
+  reset();
+  const strip = documentStub.querySelectorAll('.scroll-strip')[0];
+  if (strip) {
+    const onStrip = (type, y) => strip.dispatch(type, {
+      pointerId: 41, isPrimary: true, pointerType: 'touch',
+      clientX: 340, clientY: y, timeStamp: now,
+      preventDefault() {}, stopPropagation() {}, getCoalescedEvents: () => [],
+    });
+    onStrip('pointerdown', 200);
+    for (let i = 1; i <= 15; i++) { advance(10); onStrip('pointermove', 200 + i * 10); pumpFrames(1); }
+    advance(10);
+    onStrip('pointerup', 350);
+    pumpFrames(6);
+  }
+  const stripEvents = decode(sent);
+  const scrolls = stripEvents.filter((e) => e.op === 'scroll');
+  results.push(['scroll strip',
+    `scroll=${scrolls.length > 0} move=${stripEvents.filter((e) => e.op === 'move').length} buttons=${buttons(stripEvents) || 'none'}`,
+    'expect scroll=true move=0 buttons=none',
+    `strips=${documentStub.querySelectorAll('.scroll-strip').length} dy=${scrolls.reduce((s, e) => s + e.dy, 0)} dx=${scrolls.reduce((s, e) => s + e.dx, 0)}`]);
+
+  // 12. Opening the Keyboard tab focuses the type box straight away.
+  const typer = byId('typer');
+  let focused = 0;
+  typer.focus = () => { focused++; };
+  const keysTab = makeElement('tab-keys', 'button');
+  keysTab.className = 'tab';
+  keysTab.dataset.tab = 'keys';
+  byId('tabs').dispatch('click', { target: keysTab, preventDefault() {} });
+  results.push(['keyboard tab focus', `focus calls=${focused}`, 'expect focus calls=1', '']);
 
   console.log('');
   let failed = 0;

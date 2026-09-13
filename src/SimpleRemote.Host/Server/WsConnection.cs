@@ -230,7 +230,7 @@ public sealed class WsConnection(WebSocket socket, RemoteServer server, IPAddres
                 break;
 
             case "shortcut":
-                if (!server.Shortcuts.Invoke(message.Id))
+                if (!await server.Shortcuts.InvokeAsync(message.Id).ConfigureAwait(false))
                     await SendJsonAsync(
                         new ToastMessage { S = "Shortcut failed", Kind = "error" },
                         AppJson.Default.ToastMessage, token).ConfigureAwait(false);

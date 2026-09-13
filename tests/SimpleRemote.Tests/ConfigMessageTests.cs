@@ -20,7 +20,8 @@ public class ConfigMessageTests
     {
         var config = new ConfigStore();
         var injector = new InputInjector();
-        shortcuts = new ShortcutService(config, injector);
+        var media = new MediaController(injector);
+        shortcuts = new ShortcutService(config, injector, media);
         shortcuts.Reload();
 
         return new RemoteServer(
@@ -28,7 +29,7 @@ public class ConfigMessageTests
             new DeviceStore(Path.Combine(Path.GetTempPath(), $"sr-cfg-{Guid.NewGuid():N}.json")),
             new PairingTokenSource(),
             injector,
-            new MediaController(injector),
+            media,
             new VolumeController(),
             new ClipboardService(),
             shortcuts);
@@ -126,7 +127,7 @@ public class ConfigMessageTests
             Assert.Equal("mine", Assert.Single(store.Current.Shortcuts).Id);
 
             // And the upgrade is persisted, so it happens once.
-            Assert.Contains("\"version\": 2", File.ReadAllText(file));
+            Assert.Contains($"\"version\": {AppConfig.CurrentVersion}", File.ReadAllText(file));
         }
         finally
         {
@@ -160,6 +161,76 @@ public class ConfigMessageTests
     }
 
     /// <summary>
+    /// The config file is rewritten on every load, so the version-2 Netflix layout was persisted and
+    /// would shadow the reworked default forever. Migration must replace it - and only it.
+    /// </summary>
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void OlderNetflixLayoutIsReplacedButOtherSettingsSurvive(int version)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"sr-migrate-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(path);
+        var file = Path.Combine(path, "config.json");
+
+        File.WriteAllText(file, """
+            {
+              "version": VERSION,
+              "pointer": { "sensitivity": 1.3 },
+              "layouts": [
+                { "id": "netflix", "label": "Netflix", "rows": [
+                  { "controls": [ { "type": "button", "label": "Next episode",
+                                    "action": { "type": "keys", "target": "Shift+N" } } ] } ] },
+                { "id": "mine", "label": "Mine", "rows": [
+                  { "controls": [ { "type": "button", "label": "Refresh",
+                                    "action": { "type": "keys", "target": "F5" } } ] } ] }
+              ]
+            }
+            """.Replace("VERSION", version.ToString()));
+
+        try
+        {
+            var store = new ConfigStore(path);
+            store.Load();
+
+            var labels = store.Current.Layouts.Single(l => l.Id == "netflix")
+                .Rows.SelectMany(r => r.Controls).Select(c => c.Label).ToList();
+            Assert.DoesNotContain("Next episode", labels);
+            Assert.Contains("Skip intro", labels);
+
+            // The user's own layout and their version-2 pointer choice are untouched.
+            Assert.Contains(store.Current.Layouts, l => l.Id == "mine");
+            Assert.Equal(1.3, store.Current.Pointer.Sensitivity);
+            Assert.Equal(AppConfig.CurrentVersion, store.Current.Version);
+        }
+        finally
+        {
+            Directory.Delete(path, recursive: true);
+        }
+    }
+
+    /// <summary>Deleting the bundled layout is a choice; migration must not bring it back.</summary>
+    [Fact]
+    public void DeletedNetflixLayoutIsNotResurrected()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"sr-migrate-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(path);
+
+        File.WriteAllText(Path.Combine(path, "config.json"), """{ "version": 2, "layouts": [] }""");
+
+        try
+        {
+            var store = new ConfigStore(path);
+            store.Load();
+            Assert.Empty(store.Current.Layouts);
+        }
+        finally
+        {
+            Directory.Delete(path, recursive: true);
+        }
+    }
+
+    /// <summary>
     /// Defaults must stay inside the range the on-screen slider can correct from, so a bad default
     /// is always recoverable without editing a file on the PC.
     /// </summary>
@@ -182,7 +253,8 @@ public class ConfigMessageTests
     public void AllDefaultShortcutsCompile()
     {
         var config = new ConfigStore();
-        var shortcuts = new ShortcutService(config, new InputInjector());
+        var injector = new InputInjector();
+        var shortcuts = new ShortcutService(config, injector, new MediaController(injector));
         shortcuts.Reload();
 
         Assert.Empty(shortcuts.Errors);

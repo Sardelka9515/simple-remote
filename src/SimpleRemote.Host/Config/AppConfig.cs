@@ -14,8 +14,18 @@ public sealed class AppConfig
     /// screen-relative base. A file written by version 1 carries a value calibrated for the old
     /// meaning, and silently reinterpreting it made the cursor roughly twice as fast as intended -
     /// the kind of bug that looks like a feel problem and wastes a lot of time.
+    ///
+    /// Version 3 reworked the bundled Netflix layout (S to skip intro, the shared media panel, no
+    /// next-episode button). Because the config file is rewritten on every load, the earlier
+    /// default was already persisted and would otherwise shadow the new one forever.
+    ///
+    /// Version 4 replaced that layout again: its tab icon had been persisted as the literal text
+    /// "U0001F3AC" instead of an emoji, and its icons moved from Unicode glyphs to named SVG icons.
+    ///
+    /// Rule of thumb: any change to a bundled layout needs a version bump, or existing installs
+    /// never see it.
     /// </summary>
-    public const int CurrentVersion = 2;
+    public const int CurrentVersion = 4;
 
     /// <summary>
     /// Defaults to 0, NOT CurrentVersion: a property initializer would be kept when the field is
@@ -39,6 +49,9 @@ public sealed class AppConfig
     public PointerConfig Pointer { get; set; } = new();
 
     public List<ShortcutDefinition> Shortcuts { get; set; } = ShortcutDefinition.Defaults();
+
+    /// <summary>Custom control pages. Add one here and it appears as a tab on the phone.</summary>
+    public List<LayoutDefinition> Layouts { get; set; } = LayoutDefinition.Defaults();
 }
 
 /// <summary>
@@ -128,6 +141,7 @@ public sealed class ConfigStore
                 // An empty shortcut list is a legitimate user choice; a missing one is not.
                 Current.Pointer ??= new PointerConfig();
                 Current.Shortcuts ??= ShortcutDefinition.Defaults();
+                Current.Layouts ??= LayoutDefinition.Defaults();
                 Migrate();
 
                 // Rewrite so the file always lists every setting, including ones added by a newer
@@ -157,7 +171,19 @@ public sealed class ConfigStore
     {
         if (Current.Version >= AppConfig.CurrentVersion) return;
 
-        Current.Pointer = new PointerConfig();
+        // Steps are cumulative and individually gated, so moving from 2 to 3 does not also re-run
+        // the version 1 pointer reset and throw away settings chosen under the current meaning.
+        if (Current.Version < 2)
+            Current.Pointer = new PointerConfig();
+
+        if (Current.Version < 4)
+        {
+            // Replace only the bundled layout, in place. Layouts the user added are untouched, and a
+            // Netflix layout they deleted stays deleted.
+            var index = Current.Layouts.FindIndex(l => l.Id == "netflix");
+            if (index >= 0) Current.Layouts[index] = LayoutDefinition.Netflix();
+        }
+
         Current.Version = AppConfig.CurrentVersion;
         Save();
     }

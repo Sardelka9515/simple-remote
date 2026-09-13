@@ -6,6 +6,43 @@
   const $ = (id) => document.getElementById(id);
   const STORE_KEY = 'simpleremote.creds';
 
+  /**
+   * Named icons, drawn as inline SVG.
+   *
+   * Unicode glyphs looked like a free icon set but are not: whether U+26F6 or U+23ED renders at all
+   * depends on the fonts on the phone, many Android builds show an empty box for them, and others
+   * swap in a colour emoji that ignores the button's colour. SVG renders the same everywhere.
+   *
+   * Paths are 24x24 and drawn with currentColor, so they pick up the button's text colour.
+   */
+  const ICONS = {
+    play: 'M8 5v14l11-7z',
+    pause: 'M6 5h4v14H6zM14 5h4v14h-4z',
+    prev: 'M6 6h2v12H6zM9.5 12 18 18V6z',
+    next: 'M16 6h2v12h-2zM6 18l8.5-6L6 6z',
+    rewind: 'M12 5V1L7 6l5 5V7a6 6 0 1 1-6 6H4a8 8 0 1 0 8-8z',
+    forward: 'M12 5V1l5 5-5 5V7a6 6 0 1 0 6 6h2a8 8 0 1 1-8-8z',
+    skip: 'M3 6l7.5 6L3 18zM10.5 6 18 12l-7.5 6zM18.5 6H21v12h-2.5z',
+    back: 'M20 11H7.8l5.6-5.6L12 4l-8 8 8 8 1.4-1.4L7.8 13H20z',
+    fullscreen: 'M4 4h6v2H6v4H4zM14 4h6v6h-2V6h-4zM4 14h2v4h4v2H4zM18 14h2v6h-6v-2h4z',
+    film: 'M3 4h18v16H3zM5 6v2h2V6zm0 5v2h2v-2zm0 5v2h2v-2zM17 6v2h2V6zm0 5v2h2v-2zm0 5v2h2v-2zM9 6v12h6V6z',
+    grid: 'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z',
+  };
+
+  /**
+   * Shows an icon in an element: a known name becomes SVG, anything else (an emoji, a letter) is
+   * shown as text. Config values never reach innerHTML - only the fixed paths above do.
+   */
+  function setIcon(element, icon) {
+    if (Object.prototype.hasOwnProperty.call(ICONS, icon)) {
+      element.innerHTML = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="currentColor" fill-rule="evenodd"><path d="' + ICONS[icon] + '"/></svg>';
+      element.dataset.icon = icon;
+    } else {
+      element.textContent = icon || '';
+      element.dataset.icon = '';
+    }
+  }
+
   const link = new window.RemoteLink();
 
   /** Pointer feel, replaced by the host config message once connected. */
@@ -137,6 +174,7 @@
     if (message.pointer) P = Object.assign({}, P, message.pointer);
     if (message.hostName) $('host').textContent = message.hostName;
     renderShortcuts(message.shortcuts || []);
+    renderLayouts(message.layouts || []);
   });
 
   link.on('toast', (message) => toast(message.s, message.kind));
@@ -154,16 +192,51 @@
 
   // ---------------------------------------------------------------- tabs
 
-  for (const tab of document.querySelectorAll('.tab')) {
-    tab.addEventListener('click', () => {
-      for (const other of document.querySelectorAll('.tab')) other.classList.toggle('active', other === tab);
-      for (const page of document.querySelectorAll('.page')) page.hidden = page.dataset.page !== tab.dataset.tab;
-    });
+  // Delegated, not bound per tab: layout pages add their own tabs at runtime, and binding once
+  // at startup would leave those tabs dead.
+  $('tabs').addEventListener('click', (event) => {
+    const tab = event.target && event.target.closest ? event.target.closest('.tab') : null;
+    if (tab) selectTab(tab.dataset.tab);
+  });
+
+  function selectTab(id) {
+    for (const tab of document.querySelectorAll('.tab')) {
+      tab.classList.toggle('active', tab.dataset.tab === id);
+    }
+    for (const page of document.querySelectorAll('.page')) {
+      page.hidden = page.dataset.page !== id;
+    }
+
+    // Opening the Keyboard tab almost always means "I want to type", so raise the phone keyboard
+    // straight away. This has to run synchronously inside the tap handler - mobile browsers only
+    // show the keyboard for a focus() that comes from a user gesture - and after the page is
+    // unhidden, because a hidden element cannot take focus.
+    if (id === 'keys') focusTyper();
+  }
+
+  function focusTyper() {
+    const typer = $('typer');
+    if (!typer || typeof typer.focus !== 'function') return;
+
+    typer.focus();
+
+    // Put the caret at the end, so typing continues after anything already in the field instead
+    // of landing wherever the browser decided to place it.
+    if (typeof window.getSelection === 'function' && typeof document.createRange === 'function') {
+      const range = document.createRange();
+      range.selectNodeContents(typer);
+      range.collapse(false);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
   }
 
   // ---------------------------------------------------------------- touchpad
 
-  const pad = $('pad');
+  // The gesture engine drives whichever trackpad the finger is currently on. Only one can be
+  // visible at a time, so the gesture state is shared rather than duplicated per element.
+  let pad = $('pad');
 
   /** Live pointers on the pad, keyed by pointerId. */
   const pointers = new Map();
@@ -337,7 +410,90 @@
     return { x: event.clientX, y: event.clientY, t: event.timeStamp };
   }
 
-  pad.addEventListener('pointerdown', (event) => {
+  function attachTrackpad(element) {
+    element.addEventListener('pointerdown', onPadDown);
+    element.addEventListener('pointermove', onPadMove);
+    element.addEventListener('pointerup', endPointer);
+    element.addEventListener('pointercancel', endPointer);
+
+    // Belt and braces: iOS still emits these on some gestures and they would scroll the page.
+    element.addEventListener('touchstart', (e) => e.preventDefault(), { passive: false });
+    element.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+
+    const strip = document.createElement('div');
+    strip.className = 'scroll-strip';
+    element.appendChild(strip);
+    attachScrollStrip(strip, element);
+    return strip;
+  }
+
+  /**
+   * One-finger scroll strip along the right edge of a trackpad.
+   *
+   * Two-finger scroll needs two hands on a phone held in one. Dragging a single finger - usually the
+   * thumb - up and down this strip scrolls instead, feeding the same interpolated path and momentum
+   * as two-finger scroll so the two feel identical.
+   *
+   * The strip lives inside the trackpad, so its events would otherwise bubble into the trackpad's
+   * gesture handlers and read as cursor movement or a tap. Every handler stops propagation.
+   */
+  let stripPointer = null;
+
+  function attachScrollStrip(strip, owner) {
+    strip.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      if (event.stopPropagation) event.stopPropagation();
+
+      // A finger already on the trackpad owns the gesture; do not start a second one under it.
+      if (pointers.size > 0 || stripPointer !== null) return;
+
+      try { strip.setPointerCapture(event.pointerId); } catch (err) { /* not capturable */ }
+
+      pad = owner;
+      stripPointer = event.pointerId;
+      stopMomentum();
+      resetSampling();
+
+      // Only the vertical axis is recorded: a thumb never travels a perfectly straight line, and
+      // letting that drift through would produce unintended horizontal scrolling.
+      pushSample(0, event.clientY, event.timeStamp);
+      gestureMode = 'scroll';
+      strip.classList.add('active');
+    });
+
+    strip.addEventListener('pointermove', (event) => {
+      if (event.stopPropagation) event.stopPropagation();
+      if (event.pointerId !== stripPointer) return;
+      event.preventDefault();
+
+      for (const sample of coalescedSamples(event)) {
+        pushSample(0, sample.clientY, sample.timeStamp);
+      }
+    });
+
+    const end = (event) => {
+      if (event.stopPropagation) event.stopPropagation();
+      if (event.pointerId !== stripPointer) return;
+
+      flushRemainingMotion();
+      startMomentum();
+
+      stripPointer = null;
+      gestureMode = null;
+      resetSampling();
+      strip.classList.remove('active');
+    };
+
+    strip.addEventListener('pointerup', end);
+    strip.addEventListener('pointercancel', end);
+  }
+
+  function onPadDown(event) {
+    // Scrolling on the strip owns the gesture until it ends.
+    if (stripPointer !== null) return;
+
+    pad = event.currentTarget || pad;
+
     event.preventDefault();
 
     // Capture keeps a drag alive if the finger slides past the pad edge. It throws for a pointer
@@ -372,7 +528,7 @@
     }
 
     maxPointers = Math.max(maxPointers, pointers.size);
-  });
+  }
 
   /** Holds the left button down after a tap, pending either a release or a chained drag. */
   function holdAfterTap() {
@@ -402,7 +558,9 @@
     heldFromTap = false;
   }
 
-  pad.addEventListener('pointermove', (event) => {
+  function onPadMove(event) {
+    pad = event.currentTarget || pad;
+
     const previous = pointers.get(event.pointerId);
     if (!previous) return;
 
@@ -449,7 +607,7 @@
       // Fingers lifted mid-scroll: stop driving anything rather than jerking the cursor.
       setGestureMode(null);
     }
-  });
+  }
 
   /** Switching consumer mid-gesture must not carry the old anchor across, or the cursor jumps. */
   function setGestureMode(mode) {
@@ -593,12 +751,8 @@
   // Resample the finger path on every frame, just before the transport sends.
   link.onFrame(emitFrame);
 
-  pad.addEventListener('pointerup', endPointer);
-  pad.addEventListener('pointercancel', endPointer);
-
-  // Belt and braces: iOS still emits these on some gestures and they would scroll the page.
-  pad.addEventListener('touchstart', (e) => e.preventDefault(), { passive: false });
-  pad.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+  // The built-in Touchpad tab. Layout pages attach their own trackpads the same way.
+  attachTrackpad($('pad'));
 
   /**
    * Ratio of screen distance to pad distance.
@@ -815,27 +969,68 @@
   // ---------------------------------------------------------------- media
 
   let media = { positionMs: 0, durationMs: 0, status: 'unknown', at: 0 };
-  let seeking = false;
+  let lastMediaState = null;
 
-  link.on('mediaState', (message) => {
-    media = {
-      positionMs: message.positionMs || 0,
-      durationMs: message.durationMs || 0,
-      status: message.status,
-      at: performance.now(),
-    };
+  /**
+   * Every now-playing panel on screen: the Media tab, plus any layout that embeds one.
+   *
+   * They all paint from the same state and share one set of handlers, so a layout gets the real
+   * media interface - artwork, scrub bar, capability-aware transport - rather than a second,
+   * slightly different copy of it.
+   */
+  const mediaUis = [];
 
-    $('mtitle').textContent = message.active && message.title ? message.title : 'Nothing playing';
-    $('martist').textContent = message.artist || '';
-    $('mapp').textContent = message.app || '';
+  function registerMediaUi(ui) {
+    mediaUis.push(ui);
+    ui.seeking = false;
 
-    $('playpause').textContent = message.status === 'playing' ? '⏸' : '▶';
-    $('playpause').disabled = !message.active;
-    $('prev').disabled = !message.canPrevious;
-    $('next').disabled = !message.canNext;
-    $('seek').disabled = !message.canSeek || !message.durationMs;
+    setIcon(ui.playpause, 'play');
+    if (ui.prev) setIcon(ui.prev, 'prev');
+    if (ui.next) setIcon(ui.next, 'next');
+    if (ui.back) setIcon(ui.back, 'rewind');
+    if (ui.forward) setIcon(ui.forward, 'forward');
 
-    const art = $('art');
+    ui.playpause.addEventListener('click', () => link.sendJson({ t: 'media', cmd: 'playpause' }));
+    if (ui.prev) ui.prev.addEventListener('click', () => link.sendJson({ t: 'media', cmd: 'prev' }));
+    if (ui.next) ui.next.addEventListener('click', () => link.sendJson({ t: 'media', cmd: 'next' }));
+
+    // Relative seek buttons run host-side actions (typically arrow keys), because many players -
+    // browser video in particular - never report a seekable timeline to the media session.
+    if (ui.back) ui.back.addEventListener('click', () => link.sendJson({ t: 'shortcut', id: ui.backActionId }));
+    if (ui.forward) ui.forward.addEventListener('click', () => link.sendJson({ t: 'shortcut', id: ui.forwardActionId }));
+
+    if (ui.seek) {
+      ui.seek.addEventListener('pointerdown', () => { ui.seeking = true; });
+      ui.seek.addEventListener('change', () => {
+        ui.seeking = false;
+        if (media.durationMs > 0) {
+          const target = Math.round((Number(ui.seek.value) / 1000) * media.durationMs);
+          link.sendJson({ t: 'media', cmd: 'seek', pos: target });
+        }
+      });
+    }
+
+    // A layout can be built after the state arrived; paint it straight away rather than leaving
+    // it blank until the next track change.
+    if (lastMediaState) paintMediaUi(ui, lastMediaState);
+    return ui;
+  }
+
+  function paintMediaUi(ui, message) {
+    ui.title.textContent = message.active && message.title ? message.title : 'Nothing playing';
+    if (ui.artist) ui.artist.textContent = message.artist || '';
+    if (ui.app) ui.app.textContent = message.app || '';
+
+    setIcon(ui.playpause, message.status === 'playing' ? 'pause' : 'play');
+
+    // Play/pause stays enabled with no session: the host falls back to the hardware media key,
+    // which reaches players the media session never sees.
+    if (ui.prev) ui.prev.disabled = !message.canPrevious;
+    if (ui.next) ui.next.disabled = !message.canNext;
+    if (ui.seek) ui.seek.disabled = !message.canSeek || !message.durationMs;
+
+    const art = ui.art;
+    if (!art) return;
     if (message.artUrl) {
       if (art.dataset.url !== message.artUrl) {
         art.dataset.url = message.artUrl;
@@ -849,16 +1044,63 @@
       delete art.dataset.url;
       art.innerHTML = '<span>♫</span>';
     }
+  }
 
+  link.on('mediaState', (message) => {
+    media = {
+      positionMs: message.positionMs || 0,
+      durationMs: message.durationMs || 0,
+      status: message.status,
+      at: performance.now(),
+    };
+    lastMediaState = message;
+
+    for (const ui of mediaUis) paintMediaUi(ui, message);
     paintProgress();
   });
 
+  /**
+   * Every volume control on screen, so the Media tab and any layout page showing volume stay in
+   * step with each other and with the PC.
+   */
+  const volumeUis = [];
+  let lastMuted = false;
+
+  function registerVolumeUi(ui) {
+    volumeUis.push(ui);
+
+    let pending = null;
+    ui.slider.addEventListener('input', () => {
+      const level = Number(ui.slider.value) / 100;
+      if (ui.readout) ui.readout.textContent = Math.round(level * 100) + '%';
+
+      // Coalesced to one message per frame so dragging the slider does not spam the socket.
+      if (pending !== null) { pending = level; return; }
+      pending = level;
+      requestAnimationFrame(() => {
+        link.sendJson({ t: 'volume', level: pending });
+        pending = null;
+      });
+    });
+
+    if (ui.mute) {
+      // Toggles against the state the PC last reported, rather than a local guess that drifts
+      // the moment anything else changes the volume.
+      ui.mute.addEventListener('click', () => link.sendJson({ t: 'volume', mute: !lastMuted }));
+    }
+  }
+
   link.on('volumeState', (message) => {
     const percent = Math.round((message.level || 0) * 100);
-    if (document.activeElement !== $('vol')) $('vol').value = String(percent);
-    $('volval').textContent = percent + '%';
-    $('mute').textContent = message.muted ? '🔇' : '🔊';
-    $('voldev').textContent = message.device || '';
+    lastMuted = !!message.muted;
+
+    for (const ui of volumeUis) {
+      // Never fight the finger that is currently dragging this slider.
+      if (document.activeElement !== ui.slider) ui.slider.value = String(percent);
+      if (ui.readout) ui.readout.textContent = percent + '%';
+      if (ui.mute) ui.mute.textContent = lastMuted ? '🔇' : '🔊';
+      if (ui.device) ui.device.textContent = message.device || '';
+    }
   });
 
   /**
@@ -866,19 +1108,20 @@
    * moves smoothly without the host having to stream position at frame rate.
    */
   function paintProgress() {
-    if (seeking) return;
-
     let position = media.positionMs;
     if (media.status === 'playing') position += performance.now() - media.at;
     if (media.durationMs > 0) position = Math.min(position, media.durationMs);
 
-    $('tpos').textContent = formatTime(position);
-    $('tdur').textContent = formatTime(media.durationMs);
-
-    if (media.durationMs > 0) {
-      $('seek').value = String(Math.round((position / media.durationMs) * 1000));
-    } else {
-      $('seek').value = '0';
+    for (const ui of mediaUis) {
+      // Never fight the finger that is dragging this particular scrub bar.
+      if (ui.seeking) continue;
+      if (ui.pos) ui.pos.textContent = formatTime(position);
+      if (ui.dur) ui.dur.textContent = formatTime(media.durationMs);
+      if (ui.seek) {
+        ui.seek.value = media.durationMs > 0
+          ? String(Math.round((position / media.durationMs) * 1000))
+          : '0';
+      }
     }
   }
 
@@ -892,36 +1135,26 @@
     return minutes + ':' + String(seconds).padStart(2, '0');
   }
 
-  $('playpause').addEventListener('click', () => link.sendJson({ t: 'media', cmd: 'playpause' }));
-  $('next').addEventListener('click', () => link.sendJson({ t: 'media', cmd: 'next' }));
-  $('prev').addEventListener('click', () => link.sendJson({ t: 'media', cmd: 'prev' }));
-
-  $('seek').addEventListener('pointerdown', () => { seeking = true; });
-  $('seek').addEventListener('change', () => {
-    seeking = false;
-    if (media.durationMs > 0) {
-      const target = Math.round((Number($('seek').value) / 1000) * media.durationMs);
-      link.sendJson({ t: 'media', cmd: 'seek', pos: target });
-    }
+  // The Media tab's now-playing panel. Layout pages register theirs the same way.
+  registerMediaUi({
+    title: $('mtitle'),
+    artist: $('martist'),
+    app: $('mapp'),
+    art: $('art'),
+    playpause: $('playpause'),
+    prev: $('prev'),
+    next: $('next'),
+    seek: $('seek'),
+    pos: $('tpos'),
+    dur: $('tdur'),
   });
 
-  // Volume moves continuously; coalesce to one message per frame so a slider drag does not spam.
-  let volumePending = null;
-  $('vol').addEventListener('input', () => {
-    const level = Number($('vol').value) / 100;
-    $('volval').textContent = Math.round(level * 100) + '%';
-    if (volumePending !== null) { volumePending = level; return; }
-    volumePending = level;
-    requestAnimationFrame(() => {
-      link.sendJson({ t: 'volume', level: volumePending });
-      volumePending = null;
-    });
-  });
-
-  let muted = false;
-  $('mute').addEventListener('click', () => {
-    muted = !muted;
-    link.sendJson({ t: 'volume', mute: muted });
+  // The Media tab's volume control. Layout pages register theirs the same way.
+  registerVolumeUi({
+    slider: $('vol'),
+    readout: $('volval'),
+    mute: $('mute'),
+    device: $('voldev'),
   });
 
   // ---------------------------------------------------------------- shortcuts
@@ -933,8 +1166,9 @@
     for (const shortcut of list) {
       const button = document.createElement('button');
       button.className = 'sc';
-      button.innerHTML = '<span></span>';
-      button.firstChild.textContent = shortcut.icon || '■';
+      const icon = document.createElement('span');
+      setIcon(icon, shortcut.icon || 'grid');
+      button.appendChild(icon);
       button.appendChild(document.createTextNode(shortcut.label));
       button.addEventListener('click', () => link.sendJson({ t: 'shortcut', id: shortcut.id }));
       container.appendChild(button);
@@ -946,6 +1180,266 @@
       empty.textContent = 'No shortcuts configured.';
       container.appendChild(empty);
     }
+  }
+
+  // ---------------------------------------------------------------- layouts
+
+  /**
+   * Builds the custom control pages the host describes.
+   *
+   * Nothing here knows what Netflix is. The host sends rows of typed controls and this renders
+   * them, so a new page is a config.json edit rather than a code change on either side. An
+   * unrecognised control type is skipped rather than aborting the page, so an older client stays
+   * usable against a newer host.
+   */
+  function renderLayouts(layouts) {
+    const nav = $('tabs');
+
+    // Every reconnect resends the config and rebuilds these pages. Drop the components the previous
+    // build registered, or the registries would accumulate detached elements on each reconnect.
+    for (let i = mediaUis.length - 1; i >= 0; i--) if (mediaUis[i].layout) mediaUis.splice(i, 1);
+    for (let i = volumeUis.length - 1; i >= 0; i--) if (volumeUis[i].layout) volumeUis.splice(i, 1);
+
+    for (const stale of Array.from(document.querySelectorAll('.layout-page, .layout-tab'))) {
+      stale.remove();
+    }
+
+    for (const layout of layouts) {
+      if (!layout || !layout.id) continue;
+      const pageId = 'layout:' + layout.id;
+
+      const page = document.createElement('section');
+      page.className = 'page layout-page';
+      page.dataset.page = pageId;
+      page.hidden = true;
+
+      const body = document.createElement('div');
+      body.className = 'layout';
+      page.appendChild(body);
+
+      for (const row of layout.rows || []) {
+        const rowElement = document.createElement('div');
+        rowElement.className = row.fill ? 'layout-row fill' : 'layout-row';
+
+        for (const control of row.controls || []) {
+          const element = buildControl(control);
+          if (element) rowElement.appendChild(element);
+        }
+
+        if (rowElement.childNodes.length) body.appendChild(rowElement);
+      }
+
+      // Pages live before the tab bar so the bar stays pinned to the bottom.
+      $('app').insertBefore(page, nav);
+
+      const tab = document.createElement('button');
+      tab.className = 'tab layout-tab';
+      tab.dataset.tab = pageId;
+
+      const icon = document.createElement('span');
+      setIcon(icon, layout.icon || 'grid');
+      tab.appendChild(icon);
+      tab.appendChild(document.createTextNode(layout.label || layout.id));
+      nav.appendChild(tab);
+    }
+  }
+
+  function buildControl(control) {
+    switch (control.type) {
+      case 'button': return buildLayoutButton(control);
+      case 'trackpad': return buildLayoutTrackpad();
+      case 'volume': return buildLayoutVolume();
+      case 'media': return buildLayoutMedia(control);
+      case 'mouse': return buildLayoutMouseButtons();
+      case 'label': return buildLayoutLabel(control);
+      case 'spacer': {
+        const spacer = document.createElement('div');
+        spacer.className = 'lc-spacer';
+        return spacer;
+      }
+      default: return null;
+    }
+  }
+
+  function buildLayoutButton(control) {
+    const button = document.createElement('button');
+    button.className = control.accent ? 'lc-btn accent' : 'lc-btn';
+    button.style.flexGrow = String(control.span || 1);
+
+    if (control.icon) {
+      const icon = document.createElement('span');
+      icon.className = 'lc-icon';
+      setIcon(icon, control.icon);
+      button.appendChild(icon);
+    }
+
+    if (control.label) {
+      const label = document.createElement('span');
+      label.className = 'lc-label';
+      label.textContent = control.label;
+      button.appendChild(label);
+    }
+
+    if (control.actionId) {
+      button.addEventListener('click', () => link.sendJson({ t: 'shortcut', id: control.actionId }));
+    } else {
+      button.disabled = true;
+    }
+
+    return button;
+  }
+
+  function buildLayoutTrackpad() {
+    const element = document.createElement('div');
+    element.className = 'pad layout-pad used';
+
+    // Same gesture engine as the Touchpad tab, so tap, drag, scroll and tap-and-a-half all behave
+    // identically here rather than being a second, subtly different implementation.
+    attachTrackpad(element);
+    return element;
+  }
+
+  function buildLayoutVolume() {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'lc-volume';
+
+    const mute = document.createElement('button');
+    mute.className = 'tbtn small';
+    mute.textContent = '🔊';
+
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.className = 'vol';
+    slider.min = '0';
+    slider.max = '100';
+    slider.step = '1';
+    slider.value = '0';
+
+    const readout = document.createElement('span');
+    readout.className = 'volval';
+    readout.textContent = '0%';
+
+    wrapper.appendChild(mute);
+    wrapper.appendChild(slider);
+    wrapper.appendChild(readout);
+
+    registerVolumeUi({ slider: slider, readout: readout, mute: mute, layout: true });
+    return wrapper;
+  }
+
+  /**
+   * The Media tab's now-playing interface, embedded in a layout.
+   *
+   * A compact arrangement of the same component - artwork, title, scrub bar, transport - painted
+   * by the same code, plus optional relative-seek buttons for players that only seek by keypress.
+   */
+  function buildLayoutMedia(control) {
+    const make = (tag, className, text) => {
+      const element = document.createElement(tag);
+      if (className) element.className = className;
+      if (text !== undefined) element.textContent = text;
+      return element;
+    };
+
+    const wrapper = make('div', 'lc-media');
+
+    const top = make('div', 'lc-media-top');
+
+    // Artwork is optional: for video the "cover" is usually a random frame, and the space is worth
+    // more to the trackpad than to a thumbnail.
+    let art;
+    if (control.artwork !== false) {
+      art = make('div', 'art small');
+      art.appendChild(make('span', '', '♫'));
+    }
+    const meta = make('div', 'lc-media-meta');
+    const title = make('div', 'title', 'Nothing playing');
+    const artist = make('div', 'artist');
+    const app = make('div', 'app');
+    meta.appendChild(title);
+    meta.appendChild(artist);
+    meta.appendChild(app);
+    if (art) top.appendChild(art);
+    top.appendChild(meta);
+
+    const scrub = make('div', 'scrub');
+    const seek = make('input', 'seek');
+    seek.type = 'range';
+    seek.min = '0';
+    seek.max = '1000';
+    seek.step = '1';
+    seek.value = '0';
+    seek.disabled = true;
+    const times = make('div', 'times');
+    const pos = make('span', '', '0:00');
+    const dur = make('span', '', '0:00');
+    times.appendChild(pos);
+    times.appendChild(dur);
+    scrub.appendChild(seek);
+    scrub.appendChild(times);
+
+    const transport = make('div', 'transport compact');
+    const ui = { layout: true, title, artist, app, art, seek, pos, dur };
+
+    if (control.seekBackwardId) {
+      ui.back = make('button', 'tbtn');
+      ui.back.title = 'Back';
+      ui.backActionId = control.seekBackwardId;
+      transport.appendChild(ui.back);
+    }
+
+    // Track buttons are optional: for some players "next track" means something drastic, like
+    // jumping to the next episode, and a layout may deliberately leave them out.
+    if (control.trackButtons !== false) {
+      ui.prev = make('button', 'tbtn');
+      transport.appendChild(ui.prev);
+    }
+
+    ui.playpause = make('button', 'tbtn big');
+    transport.appendChild(ui.playpause);
+
+    if (control.trackButtons !== false) {
+      ui.next = make('button', 'tbtn');
+      transport.appendChild(ui.next);
+    }
+
+    if (control.seekForwardId) {
+      ui.forward = make('button', 'tbtn');
+      ui.forward.title = 'Forward';
+      ui.forwardActionId = control.seekForwardId;
+      transport.appendChild(ui.forward);
+    }
+
+    wrapper.appendChild(top);
+    wrapper.appendChild(scrub);
+    wrapper.appendChild(transport);
+
+    registerMediaUi(ui);
+    return wrapper;
+  }
+
+  function buildLayoutMouseButtons() {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'lc-mouse';
+
+    for (const [code, text] of [[0, 'Left'], [2, 'Mid'], [1, 'Right']]) {
+      const button = document.createElement('button');
+      button.className = 'mb';
+      button.textContent = text;
+      button.addEventListener('pointerdown', (e) => { e.preventDefault(); link.button(code, true); });
+      button.addEventListener('pointerup', (e) => { e.preventDefault(); link.button(code, false); });
+      button.addEventListener('pointercancel', () => link.button(code, false));
+      wrapper.appendChild(button);
+    }
+
+    return wrapper;
+  }
+
+  function buildLayoutLabel(control) {
+    const label = document.createElement('div');
+    label.className = 'lc-text';
+    label.textContent = control.label || '';
+    return label;
   }
 
   // ---------------------------------------------------------------- housekeeping
@@ -972,6 +1466,7 @@
       link.dropPendingMotion();
       stopMomentum();
       pointers.clear();
+      stripPointer = null;
       gestureMode = null;
       chained = false;
       resetSampling();

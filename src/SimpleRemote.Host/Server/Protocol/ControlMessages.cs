@@ -96,8 +96,50 @@ public sealed class ConfigMessage
 {
     public string T => "config";
     public List<ShortcutInfo> Shortcuts { get; set; } = [];
+
+    /// <summary>Custom control pages, rendered generically so a new one needs no client code.</summary>
+    public List<LayoutInfo> Layouts { get; set; } = [];
+
     public PointerInfo Pointer { get; set; } = new();
     public string HostName { get; set; } = Environment.MachineName;
+}
+
+public sealed class LayoutInfo
+{
+    public required string Id { get; set; }
+    public required string Label { get; set; }
+    public string? Icon { get; set; }
+    public List<LayoutRowInfo> Rows { get; set; } = [];
+}
+
+public sealed class LayoutRowInfo
+{
+    public bool Fill { get; set; }
+    public List<LayoutControlInfo> Controls { get; set; } = [];
+}
+
+public sealed class LayoutControlInfo
+{
+    public string Type { get; set; } = "button";
+    public string? Label { get; set; }
+    public string? Icon { get; set; }
+    public bool Accent { get; set; }
+    public int Span { get; set; } = 1;
+
+    /// <summary>Id to send back as a <c>shortcut</c> message. Null for non-interactive controls.</summary>
+    public string? ActionId { get; set; }
+
+    /// <summary>For <c>media</c>: action id for the rewind button, or null to hide it.</summary>
+    public string? SeekBackwardId { get; set; }
+
+    /// <summary>For <c>media</c>: action id for the fast-forward button, or null to hide it.</summary>
+    public string? SeekForwardId { get; set; }
+
+    /// <summary>For <c>media</c>: whether previous/next track buttons are shown.</summary>
+    public bool TrackButtons { get; set; } = true;
+
+    /// <summary>For <c>media</c>: whether the album-art thumbnail is shown.</summary>
+    public bool Artwork { get; set; } = true;
 }
 
 public sealed class ShortcutInfo

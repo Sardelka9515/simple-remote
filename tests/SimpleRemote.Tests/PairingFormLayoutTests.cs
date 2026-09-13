@@ -27,7 +27,7 @@ public class PairingFormLayoutTests(ITestOutputHelper output) : IDisposable
         var media = new MediaController(injector);
         var volume = new VolumeController();
         var clipboard = new ClipboardService();
-        var shortcuts = new ShortcutService(config, injector);
+        var shortcuts = new ShortcutService(config, injector, media);
         server = new RemoteServer(config, devices, pairing, injector, media, volume, clipboard, shortcuts);
         var host = new WebHost(server);
         return new PairingForm(server, host);
