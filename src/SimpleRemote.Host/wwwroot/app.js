@@ -176,6 +176,23 @@
   let scrollVelocity = 0;
   let momentumHandle = null;
 
+  /**
+   * Interpolated-emission state.
+   *
+   * Motion is no longer sent from inside the pointermove handler. Instead the finger path is
+   * resampled once per animation frame at a fixed point in time, and the delta between successive
+   * resample points is what gets sent. For a constant finger speed that produces equal deltas at
+   * equal intervals, whereas emitting whatever arrived in each frame produces uneven steps - one
+   * frame carries one touch sample, the next carries three.
+   */
+  let emitting = false;
+  let emitTime = 0;
+  let emitX = 0;
+  let emitY = 0;
+
+  /** null | 'move' | 'scroll' - which consumer the interpolated delta feeds. */
+  let gestureMode = null;
+
   const TAP_MS = 250;
   const TAP_SLOP = 12;
   const DOUBLE_TAP_MS = 300;
@@ -183,6 +200,118 @@
   // is one notch and a full pad swipe is roughly a screenful - phone users expect content to keep
   // up with the finger, and the 1:1 mapping a lower value gives reads as sluggish.
   const WHEEL_PER_PX = 4;
+
+  /**
+   * Timestamped sample history, used to estimate finger velocity.
+   *
+   * Velocity must NOT be taken from the gap between two consecutive events. Browsers deliver
+   * pointermove at irregular intervals - 1ms here, 20ms there, for identical physical motion -
+   * so distance/dt over one event pair swings by an order of magnitude sample to sample. Feeding
+   * that into an acceleration curve is precisely what makes the cursor jitter.
+   *
+   * Instead every sample is recorded with its own timestamp and velocity is measured across a
+   * fixed time window, which is stable regardless of how the events happened to be delivered.
+   */
+  const VELOCITY_WINDOW_MS = 45;
+
+  /** Retained longer than the velocity window, because interpolation reads into the recent past. */
+  const HISTORY_MS = 200;
+
+  let samples = [];
+
+  /** Smoothed gain, so the curve cannot step discontinuously between frames. */
+  let gainSmoothed = 0;
+
+  function resetSampling() {
+    samples = [];
+    gainSmoothed = 0;
+    emitting = false;
+  }
+
+  function pushSample(x, y, t) {
+    samples.push({ x: x, y: y, t: t });
+    while (samples.length > 2 && t - samples[0].t > HISTORY_MS) samples.shift();
+  }
+
+  /** Finger velocity in CSS px per ms, measured across the velocity window. */
+  function windowedVelocity() {
+    if (samples.length < 2) return { x: 0, y: 0, speed: 0 };
+
+    const last = samples[samples.length - 1];
+
+    // Oldest sample still inside the window, rather than the oldest retained.
+    let i = samples.length - 1;
+    while (i > 0 && last.t - samples[i - 1].t <= VELOCITY_WINDOW_MS) i--;
+
+    const first = samples[i];
+    const dt = last.t - first.t;
+    if (dt <= 0) return { x: 0, y: 0, speed: 0 };
+
+    const vx = (last.x - first.x) / dt;
+    const vy = (last.y - first.y) / dt;
+    return { x: vx, y: vy, speed: Math.hypot(vx, vy) };
+  }
+
+  /**
+   * The finger position at an arbitrary time, linearly interpolated between the two samples that
+   * bracket it.
+   *
+   * Deliberately does not extrapolate past the newest sample: guessing where the finger went next
+   * overshoots and then corrects, which looks exactly like the jitter this is meant to remove.
+   * Clamping instead means a stalled finger simply stops.
+   */
+  function pathAt(t) {
+    if (samples.length === 0) return null;
+
+    const first = samples[0];
+    const last = samples[samples.length - 1];
+    if (t <= first.t) return { x: first.x, y: first.y };
+    if (t >= last.t) return { x: last.x, y: last.y };
+
+    for (let i = samples.length - 1; i > 0; i--) {
+      const a = samples[i - 1];
+      const b = samples[i];
+      if (t >= a.t && t <= b.t) {
+        const span = b.t - a.t;
+        const f = span > 0 ? (t - a.t) / span : 0;
+        return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f };
+      }
+    }
+
+    return { x: last.x, y: last.y };
+  }
+
+  /**
+   * How far behind the newest sample to interpolate.
+   *
+   * Interpolation needs a sample on both sides of the target time, so the target has to lag the
+   * input stream by a little over one sample interval. That lag is the entire cost of this
+   * technique, so it is measured rather than guessed: a 120Hz digitizer gets ~12ms, a 60Hz one
+   * ~25ms, instead of everyone paying the worst case.
+   */
+  function interpolationDelay() {
+    if (samples.length < 3) return 16;
+
+    const span = samples[samples.length - 1].t - samples[0].t;
+    const mean = span / (samples.length - 1);
+    return Math.min(Math.max(mean * 1.5, 8), 28);
+  }
+
+  /**
+   * The individual timestamped samples behind one pointermove.
+   *
+   * The browser coalesces several real touch samples into one event for delivery; asking for them
+   * back gives the true high-rate stream with per-sample timestamps, which both sharpens the
+   * velocity estimate and avoids losing the shape of a fast gesture. Synthetic events return an
+   * empty list, hence the fallback.
+   */
+  function coalescedSamples(event) {
+    if (typeof event.getCoalescedEvents === 'function') {
+      const list = event.getCoalescedEvents();
+      if (list && list.length) return list;
+    }
+    return [event];
+  }
 
   function padPoint(event) {
     return { x: event.clientX, y: event.clientY, t: event.timeStamp };
@@ -207,6 +336,11 @@
       gestureStart = event.timeStamp;
       travelled = 0;
 
+      // A new gesture must not inherit the previous one's velocity, or the first movement is
+      // accelerated by however fast the last flick happened to be.
+      resetSampling();
+      pushSample(point.x, point.y, point.t);
+
       // Tap-and-a-half: a tap immediately followed by a press starts a drag, the same gesture a
       // laptop trackpad uses. Without it, dragging a window from the couch is impossible.
       const sinceTap = event.timeStamp - lastTapEnd;
@@ -226,32 +360,118 @@
 
     event.preventDefault();
 
-    const point = padPoint(event);
-    const dx = point.x - previous.x;
-    const dy = point.y - previous.y;
-    const dt = Math.max(point.t - previous.t, 1);
-    pointers.set(event.pointerId, point);
+    // Walk the real timestamped samples rather than just the delivered event, so total
+    // displacement is exact and the velocity estimate sees the true sample rate.
+    let totalDx = 0;
+    let totalDy = 0;
+    let cursor = previous;
 
-    travelled += Math.hypot(dx, dy);
+    for (const sample of coalescedSamples(event)) {
+      const x = sample.clientX;
+      const y = sample.clientY;
+      totalDx += x - cursor.x;
+      totalDy += y - cursor.y;
+      cursor = { x: x, y: y, t: sample.timeStamp };
 
+      if (event.isPrimary) pushSample(x, y, sample.timeStamp);
+    }
+
+    pointers.set(event.pointerId, cursor);
+    travelled += Math.hypot(totalDx, totalDy);
+
+    // Nothing is sent from here. The handler only records the path; emitFrame resamples it on the
+    // animation frame, so pointer and scroll both leave at an even cadence.
     if (pointers.size >= 2) {
       // Two fingers scroll. Only the primary pointer drives it - averaging every contact makes a
       // slight pinch read as scroll jitter.
-      if (event.isPrimary) {
-        const factor = WHEEL_PER_PX * P.scrollSpeed * speedScale;
-        const units = dy * factor * (P.naturalScroll ? 1 : -1);
-        const unitsX = dx * factor * (P.naturalScroll ? -1 : 1);
-        link.scrollBy(unitsX, units);
-        scrollVelocity = units / dt;
-      }
+      setGestureMode('scroll');
+    } else if (maxPointers === 1) {
+      setGestureMode('move');
+    } else {
+      // Fingers lifted mid-scroll: stop driving anything rather than jerking the cursor.
+      setGestureMode(null);
+    }
+  });
+
+  /** Switching consumer mid-gesture must not carry the old anchor across, or the cursor jumps. */
+  function setGestureMode(mode) {
+    if (gestureMode === mode) return;
+
+    flushRemainingMotion();
+    gestureMode = mode;
+    emitting = false;
+  }
+
+  /**
+   * Resamples the finger path at a fixed point in time and sends the delta since the last
+   * resample. Runs once per animation frame, immediately before the transport flushes.
+   */
+  function emitFrame() {
+    if (!gestureMode || samples.length < 2) return;
+
+    const target = performance.now() - interpolationDelay();
+    const point = pathAt(target);
+    if (!point) return;
+
+    // First frame of a gesture only anchors: there is no previous point to difference against.
+    if (!emitting) {
+      emitting = true;
+      emitTime = target;
+      emitX = point.x;
+      emitY = point.y;
       return;
     }
 
-    if (maxPointers > 1) return; // fingers lifted mid-scroll: do not jerk the cursor
+    if (target <= emitTime) return;
 
-    const [ax, ay] = accelerate(dx, dy, dt);
-    link.moveBy(ax, ay);
-  });
+    const dx = point.x - emitX;
+    const dy = point.y - emitY;
+    emitTime = target;
+    emitX = point.x;
+    emitY = point.y;
+
+    emitMotion(dx, dy);
+  }
+
+  function emitMotion(dx, dy) {
+    if (dx === 0 && dy === 0) return;
+
+    if (gestureMode === 'scroll') {
+      const factor = WHEEL_PER_PX * P.scrollSpeed * speedScale;
+      const direction = P.naturalScroll ? 1 : -1;
+      link.scrollBy(dx * factor * -direction, dy * factor * direction);
+
+      // Fling velocity from the window, not from one event pair: the latter makes identical
+      // flicks coast wildly different distances.
+      scrollVelocity = windowedVelocity().y * factor * direction;
+      return;
+    }
+
+    // Evaluated once per emission: it advances the smoothing filter.
+    const gain = pointerGain();
+    link.moveBy(dx * gain, dy * gain);
+  }
+
+  /**
+   * Sends whatever is left between the last resample point and the newest sample.
+   *
+   * Interpolating behind the input stream means the final fraction of a gesture has not been sent
+   * when the finger lifts. Without this the cursor lands slightly short of where the gesture
+   * actually ended, and a fast flick loses a visible chunk of its travel.
+   */
+  function flushRemainingMotion() {
+    if (!emitting || samples.length === 0) return;
+
+    const last = samples[samples.length - 1];
+    const dx = last.x - emitX;
+    const dy = last.y - emitY;
+
+    emitTime = last.t;
+    emitX = last.x;
+    emitY = last.y;
+
+    emitMotion(dx, dy);
+  }
 
   function endPointer(event) {
     if (!pointers.has(event.pointerId)) return;
@@ -260,6 +480,11 @@
     if (pointers.size > 0) return;
 
     pad.classList.remove('active');
+
+    // Land the tail of the gesture before anything else reads its outcome: momentum needs the
+    // final velocity, and a click must arrive with the cursor already in its final position.
+    flushRemainingMotion();
+
     const duration = event.timeStamp - gestureStart;
 
     if (dragLocked) {
@@ -287,7 +512,15 @@
 
     maxPointers = 0;
     travelled = 0;
+    gestureMode = null;
+
+    // startMomentum has already taken the velocity it needs; clearing here stops a stale sample
+    // window from seeding the next gesture.
+    resetSampling();
   }
+
+  // Resample the finger path on every frame, just before the transport sends.
+  link.onFrame(emitFrame);
 
   pad.addEventListener('pointerup', endPointer);
   pad.addEventListener('pointercancel', endPointer);
@@ -313,23 +546,26 @@
   }
 
   /**
-   * Pointer acceleration.
+   * Current pointer gain, from the windowed velocity.
    *
    * Deltas are in CSS pixels, which are already device independent, so there is no devicePixelRatio
-   * term here - dividing by it would make high-DPI phones inexplicably slower.
+   * term here - dividing by it would make high-DPI phones inexplicably slower. The base is
+   * screen-relative (see screenFit) so one sensitivity value feels the same on a laptop panel and
+   * a 4K desktop.
    *
-   * The base gain is screen-relative (see screenFit) so that the same sensitivity value feels the
-   * same whether the PC has a laptop panel or a 4K desktop.
+   * The result is low-pass filtered. Even with a windowed velocity the curve still moves as the
+   * finger accelerates, and an abrupt change in gain mid-gesture reads as the cursor twitching;
+   * easing it over a few samples keeps the response smooth without adding perceptible lag.
+   *
+   * Has a side effect on the filter state, so call it exactly once per batch of motion.
    */
-  function accelerate(dx, dy, dt) {
-    const distance = Math.hypot(dx, dy);
-    if (distance === 0) return [0, 0];
-
-    const speed = distance / dt; // CSS px per ms
-    const gain = screenFit() * P.sensitivity * speedScale
+  function pointerGain() {
+    const speed = windowedVelocity().speed;
+    const target = screenFit() * P.sensitivity * speedScale
       * (1 + P.acceleration * Math.min(speed, P.maxSpeed));
 
-    return [dx * gain, dy * gain];
+    gainSmoothed = gainSmoothed === 0 ? target : gainSmoothed * 0.6 + target * 0.4;
+    return gainSmoothed;
   }
 
   function startMomentum() {
@@ -665,6 +901,8 @@
       link.dropPendingMotion();
       stopMomentum();
       pointers.clear();
+      gestureMode = null;
+      resetSampling();
       if (dragLocked) {
         dragLocked = false;
         pad.classList.remove('dragging');

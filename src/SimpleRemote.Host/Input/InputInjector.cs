@@ -15,8 +15,13 @@ public sealed class InputInjector
     /// <summary>Upper bound on events translated from one message. Sized to fit on the stack.</summary>
     public const int MaxBatch = 64;
 
-    // Wheel notches are quantised to 120 units, but a phone produces sub-notch deltas.
-    // Dropping the remainder would make slow scrolling dead, so we carry it across messages.
+    /// <summary>
+    /// When false, wheel motion is quantised to whole 120-unit notches for the benefit of
+    /// applications that integer-divide the delta. See PointerConfig.SmoothScroll.
+    /// </summary>
+    public bool SmoothScroll { get; set; } = true;
+
+    // Only used in quantised mode, to carry the sub-notch remainder so slow scrolling still works.
     private int _scrollRemainderX;
     private int _scrollRemainderY;
 
@@ -88,7 +93,34 @@ public sealed class InputInjector
         Inject(events[..n]);
     }
 
+    /// <summary>
+    /// Emits high-resolution wheel motion.
+    ///
+    /// Deltas are passed through at 1-unit granularity rather than being quantised to whole
+    /// 120-unit notches. Quantising is what makes scrolling feel abrupt: nothing moves until the
+    /// finger has travelled a whole notch, then the view jumps three lines at once.
+    ///
+    /// Sub-notch deltas are exactly what a Windows precision touchpad sends, and what smooth
+    /// scrolling in browsers and modern apps consumes. The client carries the sub-unit fraction,
+    /// so nothing is lost to rounding on the way here.
+    /// </summary>
     private unsafe int Scroll(INPUT* dest, int capacity, int dx, int dy)
+    {
+        if (!SmoothScroll) return ScrollQuantised(dest, capacity, dx, dy);
+
+        var n = 0;
+
+        if (dy != 0 && n < capacity)
+            dest[n++] = Mouse(0, 0, unchecked((uint)dy), NativeMethods.MOUSEEVENTF_WHEEL);
+
+        if (dx != 0 && n < capacity)
+            dest[n++] = Mouse(0, 0, unchecked((uint)dx), NativeMethods.MOUSEEVENTF_HWHEEL);
+
+        return n;
+    }
+
+    /// <summary>Legacy path: whole notches only, carrying the remainder so slow drags still move.</summary>
+    private unsafe int ScrollQuantised(INPUT* dest, int capacity, int dx, int dy)
     {
         var n = 0;
 
@@ -97,7 +129,8 @@ public sealed class InputInjector
         if (notchesY != 0 && n < capacity)
         {
             _scrollRemainderY -= notchesY * NativeMethods.WHEEL_DELTA;
-            dest[n++] = Mouse(0, 0, (uint)(notchesY * NativeMethods.WHEEL_DELTA), NativeMethods.MOUSEEVENTF_WHEEL);
+            dest[n++] = Mouse(0, 0, unchecked((uint)(notchesY * NativeMethods.WHEEL_DELTA)),
+                NativeMethods.MOUSEEVENTF_WHEEL);
         }
 
         _scrollRemainderX += dx;
@@ -105,7 +138,8 @@ public sealed class InputInjector
         if (notchesX != 0 && n < capacity)
         {
             _scrollRemainderX -= notchesX * NativeMethods.WHEEL_DELTA;
-            dest[n++] = Mouse(0, 0, (uint)(notchesX * NativeMethods.WHEEL_DELTA), NativeMethods.MOUSEEVENTF_HWHEEL);
+            dest[n++] = Mouse(0, 0, unchecked((uint)(notchesX * NativeMethods.WHEEL_DELTA)),
+                NativeMethods.MOUSEEVENTF_HWHEEL);
         }
 
         return n;

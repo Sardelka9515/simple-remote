@@ -43,6 +43,7 @@
       this.rtt = null;
 
       this._handlers = new Map();
+      this._frameHook = null;
       this._creds = null;
       this._retry = 0;
       this._retryTimer = null;
@@ -173,8 +174,24 @@
       if (!this._rafHandle) this._rafHandle = requestAnimationFrame(() => this._frame());
     }
 
+    /**
+     * Called once per animation frame, immediately before the buffer is flushed.
+     *
+     * This is where the caller resamples its input path, so motion is produced on a steady cadence
+     * instead of whenever input events happened to arrive.
+     */
+    onFrame(handler) {
+      this._frameHook = handler;
+    }
+
     _frame() {
       this._rafHandle = null;
+
+      if (this._frameHook) {
+        // A fault in the hook must not kill the frame loop and with it the whole transport.
+        try { this._frameHook(); } catch (err) { /* keep the loop alive */ }
+      }
+
       this.flush(false);
       if (this.state === 'open') this._rafHandle = requestAnimationFrame(() => this._frame());
     }

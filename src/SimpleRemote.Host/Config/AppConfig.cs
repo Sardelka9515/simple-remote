@@ -54,6 +54,19 @@ public sealed class PointerConfig
 
     public double ScrollSpeed { get; set; } = 1.0;
 
+    /// <summary>
+    /// Send wheel motion at 1-unit granularity instead of whole 120-unit notches.
+    ///
+    /// On by default: notch quantisation is what makes scrolling feel abrupt, since nothing moves
+    /// until the finger has covered a whole notch and then the view jumps three lines. Browsers,
+    /// Explorer, Office and anything built on a modern toolkit consume sub-notch deltas, which is
+    /// exactly what a Windows precision touchpad sends.
+    ///
+    /// Turn it off if some older application integer-divides the wheel delta by 120 and therefore
+    /// never scrolls at all.
+    /// </summary>
+    public bool SmoothScroll { get; set; } = true;
+
     /// <summary>Content-follows-finger, matching phone conventions.</summary>
     public bool NaturalScroll { get; set; } = true;
 }

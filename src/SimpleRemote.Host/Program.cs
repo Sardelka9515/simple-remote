@@ -24,7 +24,7 @@ internal static class Program
             MessageBox.Show(
                 "Simple Remote is already running. Look for the icon in the system tray.",
                 "Simple Remote", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
+            Environment.Exit(0);
         }
 
         ApplicationConfiguration.Initialize();
@@ -34,7 +34,7 @@ internal static class Program
 
         var devices = new DeviceStore();
         var pairing = new PairingTokenSource();
-        var injector = new InputInjector();
+        var injector = new InputInjector { SmoothScroll = config.Current.Pointer.SmoothScroll };
         var media = new MediaController(injector);
         var volume = new VolumeController();
         var clipboard = new ClipboardService();

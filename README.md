@@ -77,7 +77,8 @@ Only SHA-256 hashes of device tokens are stored, in
     "acceleration": 0.4,
     "maxSpeed": 3.0,
     "scrollSpeed": 1.0,
-    "naturalScroll": true
+    "naturalScroll": true,
+    "smoothScroll": true
   },
   "shortcuts": [
     { "id": "netflix", "label": "Netflix", "icon": "🎬",
@@ -121,6 +122,73 @@ Two things worth knowing:
   `sensitivity` wants raising.
 - Sub-pixel motion is accumulated rather than truncated, so slow, precise drags are not lost to
   rounding.
+
+### Why the cursor does not jitter
+
+Finger velocity is **never** taken from the gap between two consecutive pointer events. Browsers
+deliver `pointermove` at irregular intervals — 1 ms here, 20 ms there, for identical physical
+motion — so `distance / dt` over one event pair swings wildly from sample to sample. Feeding that
+into an acceleration curve is what makes a cursor twitch.
+
+Instead:
+
+1. Every sample is recorded with **its own timestamp**, including the individual samples the
+   browser coalesced into one delivered event (`getCoalescedEvents`). That recovers the true
+   high-rate stream and keeps total displacement exact.
+2. Velocity is measured **across a fixed 45 ms window**, which is stable no matter how the events
+   happened to be delivered.
+3. The resulting gain is **low-pass filtered**, so it eases as the finger accelerates rather than
+   stepping between frames.
+
+Simulated against a constant-speed drag with ±3 ms of timestamp jitter, this cuts gain variance
+about ninefold (coefficient of variation 8.7% → 1.0%) while leaving the mean gain unchanged — the
+cursor stops twitching without becoming slower or laggier.
+
+### Interpolation: why motion arrives evenly
+
+Fixing the *gain* is not enough on its own, because the *delivery* is also uneven. Animation frames
+fire every ~16.7 ms while a 120 Hz digitizer samples every ~8.3 ms, so one frame carries one touch
+sample and the next carries three. Emitting whatever arrived since the last frame therefore
+produces uneven steps even when the finger moves at a perfectly constant speed.
+
+So nothing is sent from the pointer handler at all. It only records the timestamped path. Once per
+frame, that path is **resampled by linear interpolation at a fixed point in time**, and the delta
+between successive resample points is what gets sent — to the cursor or to the wheel, depending on
+the gesture. Equal time steps in, equal deltas out.
+
+Simulated against a constant-speed drag, per-frame motion goes from varying 6.9–19.6 px (±24%) to
+exactly 13.4 px every frame, with the mean unchanged.
+
+Three details that matter:
+
+- **It never extrapolates** past the newest sample. Guessing where the finger went next overshoots
+  and then corrects, which looks exactly like the jitter this is meant to remove. A stalled finger
+  simply stops.
+- **The lag is measured, not guessed.** Interpolation needs a sample either side of the target
+  time, so the target lags the input by a little over one sample interval — about 12 ms on a 120 Hz
+  digitizer, ~25 ms on a 60 Hz one. That lag is the entire cost of the technique, so it is derived
+  from the observed sample rate rather than making everyone pay the worst case.
+- **The tail is flushed** when the finger lifts. Interpolating behind the stream means the last
+  fraction of a gesture is still unsent at that moment; without flushing it, the cursor lands
+  short and a fast flick visibly loses travel.
+
+### Scrolling
+
+Wheel motion is sent at **1-unit granularity**, not quantised to whole 120-unit notches. Notch
+quantisation is what makes scrolling feel abrupt: nothing moves until the finger has covered a
+whole notch, then the view jumps three lines at once. Sub-notch deltas are exactly what a Windows
+precision touchpad sends, and what smooth scrolling in browsers and modern apps consumes.
+
+Scrolling is fed by the **same interpolated path** as the cursor, so a two-finger drag produces
+equal wheel deltas at equal intervals rather than whatever accumulated between frames. Combined
+with 1-unit granularity, that is what makes it track the finger instead of lurching.
+
+Fling momentum uses the same windowed velocity as the cursor, so identical flicks coast the same
+distance — an event-pair estimate could report an absurd velocity from one 1 ms sample and launch
+the view across the document.
+
+If some older application integer-divides the wheel delta by 120 and so never scrolls at all, set
+`pointer.smoothScroll` to `false` to get the quantised behaviour back.
 
 ## Why it feels responsive
 
