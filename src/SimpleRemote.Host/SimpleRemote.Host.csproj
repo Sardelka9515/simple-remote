@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <OutputType>WinExe</OutputType>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>SimpleRemote</RootNamespace>
+    <AssemblyName>SimpleRemote</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- Workstation GC: we care about pause latency, not throughput. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+
+    <!-- wwwroot is embedded so a single-file publish is genuinely standalone. -->
+    <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
+
+    <!-- This is a tray app, not a hosted site. Turning off the static-web-assets and web.config
+         pipelines keeps the publish folder to exactly one file. -->
+    <StaticWebAssetsEnabled>false</StaticWebAssetsEnabled>
+    <IsTransformWebConfigDisabled>true</IsTransformWebConfigDisabled>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="10.0.7" />
+    <PackageReference Include="QRCoder" Version="1.8.0" />
+    <PackageReference Include="NAudio.Wasapi" Version="3.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Default Web SDK globs wwwroot as Content; we want it embedded instead. -->
+    <Content Remove="wwwroot\**" />
+    <EmbeddedResource Include="wwwroot\**" />
+  </ItemGroup>
+
+</Project>

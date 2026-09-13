@@ -1,0 +1,151 @@
+<!-- Served from the embedded manifest inside SimpleRemote.exe. No build step: this file, one CSS
+     file and two JS modules are the entire client. That is deliberate - it has to load instantly
+     over Wi-Fi in a cold mobile browser the first time it is ever opened. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#101216">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Remote">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" href="icon-192.png">
+<link rel="stylesheet" href="app.css">
+<title>Simple Remote</title>
+
+<div id="app" hidden>
+  <header id="bar">
+    <span id="host">Simple Remote</span>
+    <span id="rtt" class="rtt" title="Round-trip time to the PC">--</span>
+    <span id="conn" class="dot" data-state="connecting"></span>
+  </header>
+
+  <!-- Touchpad -->
+  <section class="page" data-page="pad">
+    <div id="pad" class="pad">
+      <div class="pad-hint">
+        <strong>Trackpad</strong>
+        <span>drag to move &middot; tap to click &middot; two fingers to scroll</span>
+      </div>
+    </div>
+    <div class="pad-buttons">
+      <button class="mb" data-btn="0">Left</button>
+      <button class="mb narrow" data-btn="2">Mid</button>
+      <button class="mb" data-btn="1">Right</button>
+    </div>
+  </section>
+
+  <!-- Keyboard -->
+  <section class="page" data-page="keys" hidden>
+    <div class="keys-scroll">
+      <label class="type-field">
+        <span class="label">Type on the PC</span>
+        <!-- Contenteditable rather than an input: we consume every beforeinput event and never
+             keep local state, so autocorrect and IME composition cannot desynchronise. -->
+        <div id="typer" class="typer" contenteditable="true" role="textbox"
+             enterkeyhint="enter" autocapitalize="off" autocomplete="off" spellcheck="false"
+             data-placeholder="Tap here, then type"></div>
+      </label>
+
+      <div class="mods" id="mods">
+        <button class="key mod" data-mod="17">Ctrl</button>
+        <button class="key mod" data-mod="18">Alt</button>
+        <button class="key mod" data-mod="16">Shift</button>
+        <button class="key mod" data-mod="91">Win</button>
+      </div>
+
+      <div class="keygrid">
+        <button class="key" data-vk="27">Esc</button>
+        <button class="key" data-vk="9">Tab</button>
+        <button class="key" data-vk="8">Bksp</button>
+        <button class="key" data-vk="46">Del</button>
+        <button class="key" data-vk="13">Enter</button>
+        <button class="key" data-vk="36">Home</button>
+        <button class="key" data-vk="35">End</button>
+        <button class="key" data-vk="33">PgUp</button>
+        <button class="key" data-vk="34">PgDn</button>
+        <button class="key" data-vk="93">Menu</button>
+      </div>
+
+      <div class="arrows">
+        <button class="key arrow up" data-vk="38">&#9650;</button>
+        <button class="key arrow left" data-vk="37">&#9664;</button>
+        <button class="key arrow down" data-vk="40">&#9660;</button>
+        <button class="key arrow right" data-vk="39">&#9654;</button>
+      </div>
+
+      <details class="fkeys">
+        <summary>Function keys</summary>
+        <div class="keygrid" id="fkeys"></div>
+      </details>
+
+      <div class="clip">
+        <span class="label">Clipboard</span>
+        <textarea id="clipText" rows="3" placeholder="Paste here, then send to the PC"></textarea>
+        <div class="clip-row">
+          <button id="clipSend" class="btn primary">Send to PC</button>
+          <button id="clipPull" class="btn">Get from PC</button>
+        </div>
+        <p class="note" id="clipNote"></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Media -->
+  <section class="page" data-page="media" hidden>
+    <div class="media">
+      <div id="art" class="art"><span>&#9835;</span></div>
+      <div class="meta">
+        <div id="mtitle" class="title">Nothing playing</div>
+        <div id="martist" class="artist"></div>
+        <div id="mapp" class="app"></div>
+      </div>
+
+      <div class="scrub">
+        <input id="seek" class="seek" type="range" min="0" max="1000" value="0" step="1" disabled>
+        <div class="times"><span id="tpos">0:00</span><span id="tdur">0:00</span></div>
+      </div>
+
+      <div class="transport">
+        <button id="prev" class="tbtn">&#9198;</button>
+        <button id="playpause" class="tbtn big">&#9654;</button>
+        <button id="next" class="tbtn">&#9197;</button>
+      </div>
+
+      <div class="volume">
+        <button id="mute" class="tbtn small">&#128266;</button>
+        <input id="vol" class="vol" type="range" min="0" max="100" value="0" step="1">
+        <span id="volval" class="volval">0%</span>
+      </div>
+      <div id="voldev" class="app center"></div>
+    </div>
+  </section>
+
+  <!-- Shortcuts -->
+  <section class="page" data-page="apps" hidden>
+    <div id="shortcuts" class="shortcuts"></div>
+    <p class="note center">Edit these in config.json on the PC (tray icon &rarr; Edit settings file).</p>
+  </section>
+
+  <nav id="tabs">
+    <button class="tab active" data-tab="pad"><span>&#9723;</span>Touchpad</button>
+    <button class="tab" data-tab="keys"><span>&#9000;</span>Keyboard</button>
+    <button class="tab" data-tab="media"><span>&#9835;</span>Media</button>
+    <button class="tab" data-tab="apps"><span>&#9635;</span>Shortcuts</button>
+  </nav>
+</div>
+
+<div id="gate" class="gate">
+  <div class="gate-card">
+    <div class="gate-icon">&#128241;</div>
+    <h1 id="gateTitle">Connecting&hellip;</h1>
+    <p id="gateText">Pairing this device with your PC.</p>
+    <button id="gateRetry" class="btn primary" hidden>Try again</button>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="protocol.js"></script>
+<script src="app.js"></script>
