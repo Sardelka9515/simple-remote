@@ -7,6 +7,23 @@ namespace SimpleRemote.Config;
 /// <summary>User-editable settings, persisted to %APPDATA%\SimpleRemote\config.json.</summary>
 public sealed class AppConfig
 {
+    /// <summary>
+    /// Bumped whenever the *meaning* of a setting changes, not merely its default.
+    ///
+    /// Version 2 redefined pointer sensitivity from an absolute gain into a multiplier on a
+    /// screen-relative base. A file written by version 1 carries a value calibrated for the old
+    /// meaning, and silently reinterpreting it made the cursor roughly twice as fast as intended -
+    /// the kind of bug that looks like a feel problem and wastes a lot of time.
+    /// </summary>
+    public const int CurrentVersion = 2;
+
+    /// <summary>
+    /// Defaults to 0, NOT CurrentVersion: a property initializer would be kept when the field is
+    /// absent from the JSON, making every pre-versioning file look current and silently skipping
+    /// its migration. Fresh configs get the current version set explicitly on creation.
+    /// </summary>
+    public int Version { get; set; }
+
     public int Port { get; set; } = 8787;
 
     /// <summary>HTTPS seam: flip this (plus a cert) and the whole stack follows.</summary>
@@ -52,6 +69,16 @@ public sealed class PointerConfig
     /// <summary>Upper bound on the speed term, so a fast flick cannot fling the cursor unboundedly.</summary>
     public double MaxSpeed { get; set; } = 3.0;
 
+    /// <summary>
+    /// How long a tap holds the left button down before releasing, in milliseconds.
+    ///
+    /// This is the tap-and-a-half window: a second press arriving while the button is still held
+    /// becomes a drag, and because no second button-down is ever sent, the host cannot mistake the
+    /// gesture for a double click. The trade-off is that a plain tap activates this much later,
+    /// so it wants to be just long enough to cover the pause between the tap and the press.
+    /// </summary>
+    public int TapHoldMs { get; set; } = 200;
+
     public double ScrollSpeed { get; set; } = 1.0;
 
     /// <summary>
@@ -77,7 +104,16 @@ public sealed class ConfigStore
     public static string DataDirectory { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SimpleRemote");
 
-    public string FilePath { get; } = Path.Combine(DataDirectory, "config.json");
+    private readonly string _directory;
+
+    /// <param name="directory">Override for the settings location; defaults to %APPDATA%\SimpleRemote.</param>
+    public ConfigStore(string? directory = null)
+    {
+        _directory = directory ?? DataDirectory;
+        FilePath = Path.Combine(_directory, "config.json");
+    }
+
+    public string FilePath { get; }
 
     public AppConfig Current { get; private set; } = new();
 
@@ -92,6 +128,11 @@ public sealed class ConfigStore
                 // An empty shortcut list is a legitimate user choice; a missing one is not.
                 Current.Pointer ??= new PointerConfig();
                 Current.Shortcuts ??= ShortcutDefinition.Defaults();
+                Migrate();
+
+                // Rewrite so the file always lists every setting, including ones added by a newer
+                // build. A knob that does not appear in the file is a knob nobody finds.
+                Save();
                 return;
             }
         }
@@ -100,7 +141,24 @@ public sealed class ConfigStore
             // Corrupt config must never block startup - fall back to defaults and rewrite.
         }
 
-        Current = new AppConfig();
+        Current = new AppConfig { Version = AppConfig.CurrentVersion };
+        Save();
+    }
+
+    /// <summary>
+    /// Brings a file written by an older version up to date.
+    ///
+    /// Only the pointer block is reset, and only when the stored version predates the change in
+    /// its units - everything a user is likely to have deliberately customised (port, shortcuts,
+    /// chosen network) is preserved. The per-device Speed slider on the phone is the real tuning
+    /// control now, so re-deriving these is cheap.
+    /// </summary>
+    private void Migrate()
+    {
+        if (Current.Version >= AppConfig.CurrentVersion) return;
+
+        Current.Pointer = new PointerConfig();
+        Current.Version = AppConfig.CurrentVersion;
         Save();
     }
 
@@ -108,7 +166,7 @@ public sealed class ConfigStore
     {
         try
         {
-            Directory.CreateDirectory(DataDirectory);
+            Directory.CreateDirectory(_directory);
             File.WriteAllText(FilePath, JsonSerializer.Serialize(Current, AppJson.Default.AppConfig));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -132,4 +190,5 @@ public sealed class ConfigStore
 [JsonSerializable(typeof(SimpleRemote.Server.Protocol.ConfigMessage))]
 [JsonSerializable(typeof(SimpleRemote.Server.ApiPairRequest))]
 [JsonSerializable(typeof(SimpleRemote.Server.ApiPairResponse))]
+[JsonSerializable(typeof(SimpleRemote.Server.ApiHealthResponse))]
 public partial class AppJson : JsonSerializerContext;

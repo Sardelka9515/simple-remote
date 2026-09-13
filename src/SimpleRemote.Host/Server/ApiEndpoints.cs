@@ -19,12 +19,24 @@ public sealed class ApiPairResponse
     public string HostName { get; set; } = Environment.MachineName;
 }
 
+/// <summary>
+/// Health probe payload.
+///
+/// A named type rather than an anonymous one specifically so it can be source-generated: under
+/// Native AOT there is no reflection-based serializer to fall back on, and an anonymous type here
+/// makes the endpoint return 500.
+/// </summary>
+public sealed class ApiHealthResponse
+{
+    public bool Ok { get; set; } = true;
+}
+
 /// <summary>HTTP surface: pairing, album art, health, and the WebSocket upgrade.</summary>
 public static class ApiEndpoints
 {
     public static void Map(WebApplication app, RemoteServer server, WebHost host)
     {
-        app.MapGet("/healthz", () => Results.Ok(new { ok = true }));
+        app.MapGet("/healthz", () => Results.Json(new ApiHealthResponse(), AppJson.Default.ApiHealthResponse));
 
         app.MapPost("/api/pair", async (HttpContext ctx) =>
         {

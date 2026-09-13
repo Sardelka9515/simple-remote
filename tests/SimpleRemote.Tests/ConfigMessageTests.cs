@@ -61,6 +61,21 @@ public class ConfigMessageTests
         Assert.Equal(shortcuts.Describe().Count, message.Shortcuts.Count);
     }
 
+    /// <summary>
+    /// Every JSON payload the HTTP surface returns must be source-generated. Under Native AOT
+    /// there is no reflection-based serializer to fall back on, so an anonymous type makes the
+    /// endpoint return 500 - which is exactly how /healthz broke, and it compiled cleanly.
+    /// </summary>
+    [Fact]
+    public void HealthResponseIsSourceGenerated()
+    {
+        // Asserts content, not formatting: the context is WriteIndented for readable config.json.
+        var json = JsonSerializer.Serialize(new ApiHealthResponse(), AppJson.Default.ApiHealthResponse);
+
+        using var parsed = JsonDocument.Parse(json);
+        Assert.True(parsed.RootElement.GetProperty("ok").GetBoolean());
+    }
+
     [Fact]
     public void ConfigSerializesScreenSizeToCamelCase()
     {
@@ -70,6 +85,78 @@ public class ConfigMessageTests
 
         Assert.Contains("\"screenWidth\"", json);
         Assert.Contains("\"screenHeight\"", json);
+    }
+
+    /// <summary>
+    /// A version-1 file holds a sensitivity calibrated as an absolute gain. Applying it to the
+    /// screen-relative base makes the cursor about twice as fast as intended, so it must be reset
+    /// rather than carried forward - while genuine customisation survives.
+    /// </summary>
+    [Fact]
+    public void StaleConfigHasItsPointerBlockResetButKeepsEverythingElse()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"sr-migrate-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(path);
+        var file = Path.Combine(path, "config.json");
+
+        File.WriteAllText(file, """
+            {
+              "port": 9999,
+              "preferredAddress": "10.1.2.3",
+              "pointer": { "sensitivity": 1.0, "acceleration": 0.5, "maxSpeed": 3.0 },
+              "shortcuts": [
+                { "id": "mine", "label": "Mine", "action": { "type": "keys", "target": "F5" } }
+              ]
+            }
+            """);
+
+        try
+        {
+            var store = new ConfigStore(path);
+            store.Load();
+
+            // Units changed, so the stale pointer values go.
+            Assert.Equal(new PointerConfig().Sensitivity, store.Current.Pointer.Sensitivity);
+            Assert.Equal(new PointerConfig().Acceleration, store.Current.Pointer.Acceleration);
+            Assert.Equal(AppConfig.CurrentVersion, store.Current.Version);
+
+            // Deliberate customisation is preserved.
+            Assert.Equal(9999, store.Current.Port);
+            Assert.Equal("10.1.2.3", store.Current.PreferredAddress);
+            Assert.Equal("mine", Assert.Single(store.Current.Shortcuts).Id);
+
+            // And the upgrade is persisted, so it happens once.
+            Assert.Contains("\"version\": 2", File.ReadAllText(file));
+        }
+        finally
+        {
+            Directory.Delete(path, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void CurrentVersionConfigIsLeftAlone()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"sr-migrate-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(path);
+
+        File.WriteAllText(Path.Combine(path, "config.json"), """
+            { "version": 2, "pointer": { "sensitivity": 1.8, "acceleration": 0.9 } }
+            """);
+
+        try
+        {
+            var store = new ConfigStore(path);
+            store.Load();
+
+            // A value the user chose under the current meaning must survive.
+            Assert.Equal(1.8, store.Current.Pointer.Sensitivity);
+            Assert.Equal(0.9, store.Current.Pointer.Acceleration);
+        }
+        finally
+        {
+            Directory.Delete(path, recursive: true);
+        }
     }
 
     /// <summary>

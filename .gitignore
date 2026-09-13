@@ -2,4 +2,5 @@ bin/
 obj/
 *.user
 publish/
+publish-aot/
 /.vs/SimpleRemote.slnx

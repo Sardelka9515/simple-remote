@@ -149,6 +149,7 @@ public sealed class RemoteServer : IDisposable
                 MaxSpeed = Config.Current.Pointer.MaxSpeed,
                 ScrollSpeed = Config.Current.Pointer.ScrollSpeed,
                 NaturalScroll = Config.Current.Pointer.NaturalScroll,
+                TapHoldMs = Config.Current.Pointer.TapHoldMs,
                 ScreenWidth = screen.Width,
                 ScreenHeight = screen.Height,
             },

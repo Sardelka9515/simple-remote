@@ -81,7 +81,8 @@ Only SHA-256 hashes of device tokens are stored, in
     "maxSpeed": 3.0,
     "scrollSpeed": 1.0,
     "naturalScroll": true,
-    "smoothScroll": true
+    "smoothScroll": true,
+    "tapHoldMs": 200
   },
   "shortcuts": [
     { "id": "netflix", "label": "Netflix", "icon": "🎬",
@@ -146,6 +147,35 @@ Instead:
 Simulated against a constant-speed drag with ±3 ms of timestamp jitter, this cuts gain variance
 about ninefold (coefficient of variation 8.7% → 1.0%) while leaving the mean gain unchanged — the
 cursor stops twitching without becoming slower or laggier.
+
+### Tap-and-a-half, and why a tap does not release immediately
+
+Tap, then press again and drag: the press adopts the button the tap left held, so you drag whatever
+is under the cursor. Lifting ends the drag.
+
+The important detail is that **a tap does not send a complete click.** It sends the button down and
+holds it for `tapHoldMs` (200 ms by default). Only if no second press arrives does the button come
+up.
+
+Releasing immediately is what broke this gesture. The host then saw `down, up` followed by another
+`down` at the same spot inside Windows' double-click time — which *is* a double click by
+definition, so applications ran their double-click behaviour instead of dragging. Holding the
+button means the host sees one `down`, the movement, and one `up`: a single clean click-drag.
+
+Two quick taps in place still produce a real double click. The decision is deferred to how the
+second gesture turns out — moved means drag, lifted in place means the second click is sent after
+all.
+
+The cost is that a plain tap's click activates `tapHoldMs` later. The press itself is immediate, so
+buttons still highlight the moment you touch. Lower it if the delay bothers you; raise it if the
+pause between your tap and your press is longer than 200 ms.
+
+These sequences are covered by `tests/client/gestures.js`, which drives the real client code and
+asserts the exact button events it emits:
+
+```bash
+node tests/client/gestures.js
+```
 
 ### Interpolation: why motion arrives evenly
 

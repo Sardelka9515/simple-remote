@@ -114,6 +114,7 @@ public sealed class PointerInfo
     public double MaxSpeed { get; set; }
     public double ScrollSpeed { get; set; }
     public bool NaturalScroll { get; set; }
+    public int TapHoldMs { get; set; }
 
     /// <summary>
     /// Size of the whole virtual desktop, in pixels.

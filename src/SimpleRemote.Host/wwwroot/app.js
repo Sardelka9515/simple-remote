@@ -11,7 +11,7 @@
   /** Pointer feel, replaced by the host config message once connected. */
   let P = {
     sensitivity: 0.55, acceleration: 0.4, maxSpeed: 3.0, scrollSpeed: 1.0, naturalScroll: true,
-    screenWidth: 0, screenHeight: 0,
+    tapHoldMs: 200, screenWidth: 0, screenHeight: 0,
   };
 
   /**
@@ -132,7 +132,9 @@
   });
 
   link.on('config', (message) => {
-    if (message.pointer) P = message.pointer;
+    // Merged rather than replaced: a field the host omits would otherwise become undefined, and
+    // an undefined timeout or gain silently breaks the gesture it belongs to.
+    if (message.pointer) P = Object.assign({}, P, message.pointer);
     if (message.hostName) $('host').textContent = message.hostName;
     renderShortcuts(message.shortcuts || []);
   });
@@ -195,7 +197,25 @@
 
   const TAP_MS = 250;
   const TAP_SLOP = 12;
-  const DOUBLE_TAP_MS = 300;
+
+  /**
+   * Tap-and-a-half state.
+   *
+   * A tap does NOT send a complete click. It sends the button down and holds it for a moment. If a
+   * second press arrives while it is still held, that press adopts the already-down button and
+   * becomes a drag.
+   *
+   * Releasing immediately is what broke this gesture: the host then saw down/up followed by
+   * another down at the same spot inside Windows' double-click time, which is by definition a
+   * double click, so applications ran their double-click behaviour instead of dragging. Holding
+   * the button means the host sees a single down, the movement, and one up.
+   *
+   * The cost is that a plain tap's release is deferred by the hold, so the click activates that
+   * much later. The press itself is still immediate, which is what gives the visual feedback.
+   */
+  let heldFromTap = false;
+  let releaseTimer = null;
+  let chained = false;
   // Wheel units per CSS pixel of finger travel. One notch is 120 units, so 4 means a 30px drag
   // is one notch and a full pad swipe is roughly a screenful - phone users expect content to keep
   // up with the finger, and the 1:1 mapping a lower value gives reads as sluggish.
@@ -341,18 +361,46 @@
       resetSampling();
       pushSample(point.x, point.y, point.t);
 
-      // Tap-and-a-half: a tap immediately followed by a press starts a drag, the same gesture a
-      // laptop trackpad uses. Without it, dragging a window from the couch is impossible.
-      const sinceTap = event.timeStamp - lastTapEnd;
-      if (sinceTap < DOUBLE_TAP_MS && Math.hypot(point.x - lastTapX, point.y - lastTapY) < 40) {
-        dragLocked = true;
-        pad.classList.add('dragging');
-        link.button(0, true);
+      // Tap-and-a-half: this press lands while the previous tap still has the button held, so it
+      // adopts that button rather than pressing a new one. No second down reaches the host, so
+      // nothing can read as a double click.
+      const near = Math.hypot(point.x - lastTapX, point.y - lastTapY) < 40;
+      if (heldFromTap && near) {
+        cancelPendingRelease();
+        chained = true;
       }
     }
 
     maxPointers = Math.max(maxPointers, pointers.size);
   });
+
+  /** Holds the left button down after a tap, pending either a release or a chained drag. */
+  function holdAfterTap() {
+    link.button(0, true);
+    heldFromTap = true;
+
+    cancelPendingRelease();
+    releaseTimer = setTimeout(() => {
+      releaseTimer = null;
+      if (!heldFromTap || chained) return;
+      link.button(0, false);
+      heldFromTap = false;
+    }, P.tapHoldMs);
+  }
+
+  function cancelPendingRelease() {
+    if (releaseTimer === null) return;
+    clearTimeout(releaseTimer);
+    releaseTimer = null;
+  }
+
+  /** Releases a held button immediately, whatever the reason it was held. */
+  function releaseHeld() {
+    cancelPendingRelease();
+    if (!heldFromTap) return;
+    link.button(0, false);
+    heldFromTap = false;
+  }
 
   pad.addEventListener('pointermove', (event) => {
     const previous = pointers.get(event.pointerId);
@@ -378,6 +426,16 @@
 
     pointers.set(event.pointerId, cursor);
     travelled += Math.hypot(totalDx, totalDy);
+
+    // A chained press that has moved is a drag, not a second tap. Confirm it visually only once
+    // that is known, so the badge never lies.
+    if (chained && !dragLocked && travelled >= TAP_SLOP) {
+      dragLocked = true;
+      pad.classList.add('dragging');
+      if (typeof navigator.vibrate === 'function') {
+        try { navigator.vibrate(15); } catch (err) { /* unsupported */ }
+      }
+    }
 
     // Nothing is sent from here. The handler only records the path; emitFrame resamples it on the
     // animation frame, so pointer and scroll both leave at an even cadence.
@@ -487,15 +545,28 @@
 
     const duration = event.timeStamp - gestureStart;
 
-    if (dragLocked) {
-      dragLocked = false;
-      pad.classList.remove('dragging');
-      link.button(0, false);
-    } else if (duration < TAP_MS && travelled < TAP_SLOP) {
-      // A tap. Which button depends on how many fingers were down at the peak of the gesture.
-      if (maxPointers === 1) {
+    const wasTap = duration < TAP_MS && travelled < TAP_SLOP;
+
+    if (chained) {
+      // This gesture adopted the button held by the previous tap, so releasing it completes
+      // whatever it turned out to be.
+      chained = false;
+      releaseHeld();
+
+      if (dragLocked) {
+        dragLocked = false;
+        pad.classList.remove('dragging');
+      } else if (wasTap) {
+        // Two quick taps in the same spot: the user meant a double click, so send the second
+        // click that the hold deliberately withheld.
         link.button(0, true);
         link.button(0, false);
+      }
+    } else if (wasTap) {
+      // A tap. Which button depends on how many fingers were down at the peak of the gesture.
+      if (maxPointers === 1) {
+        // Held, not released: see the tap-and-a-half note above.
+        holdAfterTap();
         lastTapEnd = event.timeStamp;
         lastTapX = event.clientX;
         lastTapY = event.clientY;
@@ -902,11 +973,15 @@
       stopMomentum();
       pointers.clear();
       gestureMode = null;
+      chained = false;
       resetSampling();
+
+      // A held or dragging button must never survive backgrounding, or it stays down on the PC
+      // with no finger left to release it.
+      releaseHeld();
       if (dragLocked) {
         dragLocked = false;
         pad.classList.remove('dragging');
-        link.button(0, false);
       }
       return;
     }
