@@ -25,7 +25,15 @@ public sealed class PairingForm : Form
     private readonly ComboBox _addresses = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
     private readonly TextBox _url = new() { ReadOnly = true, Dock = DockStyle.Fill, TextAlign = HorizontalAlignment.Center, BorderStyle = BorderStyle.None };
     private readonly ListView _devices = new() { View = View.Details, FullRowSelect = true, Dock = DockStyle.Fill, MultiSelect = false };
-    private readonly Label _status = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, ForeColor = Color.FromArgb(120, 120, 130) };
+    private readonly Label _status = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, ForeColor = Color.FromArgb(120, 120, 130), AutoEllipsis = true };
+
+    private TableLayoutPanel? _root;
+    private Label? _networkLabel;
+    private readonly Button _close = new() { Text = "Close", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowOnly };
+    private readonly Button _revoke = new() { Text = "Revoke selected", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowOnly };
+    private readonly Button _copy = new() { Text = "Copy link", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowOnly };
+    private readonly Button _newCode = new() { Text = "New code", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowOnly };
+    private readonly Button _firewall = new() { Text = "Fix firewall", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowOnly };
 
     /// <summary>
     /// Refreshes the code before its 5 minute lifetime runs out. Without this, a window left open
@@ -45,12 +53,16 @@ public sealed class PairingForm : Form
         _server = server;
         _host = host;
 
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(96f, 96f);
+
         Text = "Simple Remote - Pair a device";
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(560, 640);
-        Size = new Size(560, 720);
         Icon = AppIcon.Create(connected: false);
-        Font = new Font("Segoe UI", 9f);
+
+        var scale = DeviceDpi / 96f;
+        ClientSize = new Size((int)(600 * scale), (int)(720 * scale));
+        MinimumSize = new Size((int)(540 * scale), (int)(620 * scale));
 
         BuildLayout();
 
@@ -64,74 +76,151 @@ public sealed class PairingForm : Form
 
     private void BuildLayout()
     {
-        var root = new TableLayoutPanel
+        _root = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
             RowCount = 7,
-            Padding = new Padding(16),
+            Padding = new Padding(LogicalToDeviceUnits(16)),
         };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));   // instructions
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // qr
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));   // url
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));   // address picker
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));   // status
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 150));  // devices
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));   // buttons
+        _root.RowStyles.Add(new RowStyle(SizeType.AutoSize));                      // instructions
+        _root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));                  // qr
+        _root.RowStyles.Add(new RowStyle(SizeType.AutoSize));                      // url
+        _root.RowStyles.Add(new RowStyle(SizeType.AutoSize));                      // address picker
+        _root.RowStyles.Add(new RowStyle(SizeType.Absolute, LogicalToDeviceUnits(28))); // status
+        _root.RowStyles.Add(new RowStyle(SizeType.Absolute, LogicalToDeviceUnits(140)));// devices
+        _root.RowStyles.Add(new RowStyle(SizeType.AutoSize));                      // buttons
 
-        root.Controls.Add(new Label
+        var instructions = new Label
         {
             Text = "Scan with your phone camera. No app to install.",
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleCenter,
-            Font = new Font("Segoe UI", 11f, FontStyle.Regular),
-        }, 0, 0);
+            Font = new Font(Font.FontFamily, 11f, FontStyle.Regular),
+            AutoSize = true,
+            Margin = new Padding(0, 0, 0, LogicalToDeviceUnits(6)),
+        };
+        _root.Controls.Add(instructions, 0, 0);
 
-        root.Controls.Add(_qr, 0, 1);
-        root.Controls.Add(_url, 0, 2);
+        _root.Controls.Add(_qr, 0, 1);
 
-        var addressRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
-        addressRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
+        _url.Margin = new Padding(0, LogicalToDeviceUnits(4), 0, LogicalToDeviceUnits(4));
+        _root.Controls.Add(_url, 0, 2);
+
+        var addressRow = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Margin = new Padding(0, LogicalToDeviceUnits(4), 0, LogicalToDeviceUnits(4)),
+        };
+        addressRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         addressRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        addressRow.Controls.Add(new Label
+
+        _networkLabel = new Label
         {
             Text = "Network:",
-            Dock = DockStyle.Fill,
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
             TextAlign = ContentAlignment.MiddleLeft,
-        }, 0, 0);
+            Margin = new Padding(0, 0, LogicalToDeviceUnits(8), 0),
+        };
+        addressRow.Controls.Add(_networkLabel, 0, 0);
         addressRow.Controls.Add(_addresses, 1, 0);
-        root.Controls.Add(addressRow, 0, 3);
+        _root.Controls.Add(addressRow, 0, 3);
 
-        root.Controls.Add(_status, 0, 4);
+        _status.Margin = new Padding(0, LogicalToDeviceUnits(4), 0, LogicalToDeviceUnits(4));
+        _root.Controls.Add(_status, 0, 4);
 
-        _devices.Columns.Add("Paired device", 240);
-        _devices.Columns.Add("Last seen", 150);
-        _devices.Columns.Add("Status", 90);
-        root.Controls.Add(_devices, 0, 5);
+        _devices.Columns.Add("Paired device", LogicalToDeviceUnits(220));
+        _devices.Columns.Add("Last seen", LogicalToDeviceUnits(140));
+        _devices.Columns.Add("Status", LogicalToDeviceUnits(90));
+        _devices.Resize += (_, _) => AdjustDeviceColumnWidths();
+        _root.Controls.Add(_devices, 0, 5);
 
-        var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft };
+        var buttons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            WrapContents = true,
+            Margin = new Padding(0, LogicalToDeviceUnits(6), 0, 0),
+        };
 
-        var close = new Button { Text = "Close", Width = 90, Height = 30 };
-        close.Click += (_, _) => Close();
+        _close.Click += (_, _) => Close();
+        _revoke.Click += (_, _) => RevokeSelected();
+        _copy.Click += (_, _) => CopyLink();
+        _newCode.Click += (_, _) => RegenerateQr();
+        _firewall.Click += (_, _) => FixFirewall();
 
-        var revoke = new Button { Text = "Revoke selected", Width = 130, Height = 30 };
-        revoke.Click += (_, _) => RevokeSelected();
+        ConfigureButton(_close, 85);
+        ConfigureButton(_revoke, 125);
+        ConfigureButton(_copy, 90);
+        ConfigureButton(_newCode, 90);
+        ConfigureButton(_firewall, 100);
 
-        var copy = new Button { Text = "Copy link", Width = 90, Height = 30 };
-        copy.Click += (_, _) => CopyLink();
+        buttons.Controls.AddRange([_close, _revoke, _copy, _newCode, _firewall]);
+        _root.Controls.Add(buttons, 0, 6);
 
-        var newCode = new Button { Text = "New code", Width = 90, Height = 30 };
-        newCode.Click += (_, _) => RegenerateQr();
-
-        var firewall = new Button { Text = "Fix firewall", Width = 100, Height = 30 };
-        firewall.Click += (_, _) => FixFirewall();
-
-        buttons.Controls.AddRange([close, revoke, copy, newCode, firewall]);
-        root.Controls.Add(buttons, 0, 6);
-
-        Controls.Add(root);
+        Controls.Add(_root);
 
         _addresses.SelectedIndexChanged += (_, _) => { if (!_suppressAddressEvents) RegenerateQr(); };
+
+        AdjustDeviceColumnWidths();
+    }
+
+    private void ConfigureButton(Button button, int baseWidth)
+    {
+        button.MinimumSize = new Size(LogicalToDeviceUnits(baseWidth), LogicalToDeviceUnits(32));
+        button.Margin = new Padding(LogicalToDeviceUnits(3), LogicalToDeviceUnits(3), LogicalToDeviceUnits(3), LogicalToDeviceUnits(3));
+        button.Padding = new Padding(LogicalToDeviceUnits(8), 0, LogicalToDeviceUnits(8), 0);
+    }
+
+    private void AdjustDeviceColumnWidths()
+    {
+        if (_devices.Columns.Count < 3) return;
+        var lastSeenWidth = LogicalToDeviceUnits(140);
+        var statusWidth = LogicalToDeviceUnits(90);
+        var remaining = _devices.ClientSize.Width - lastSeenWidth - statusWidth - 4;
+        _devices.Columns[0].Width = Math.Max(LogicalToDeviceUnits(160), remaining);
+        _devices.Columns[1].Width = lastSeenWidth;
+        _devices.Columns[2].Width = statusWidth;
+    }
+
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        RescaleLayout();
+    }
+
+    private void RescaleLayout()
+    {
+        var scale = DeviceDpi / 96f;
+        MinimumSize = new Size((int)(540 * scale), (int)(620 * scale));
+
+        if (_root != null)
+        {
+            _root.Padding = new Padding(LogicalToDeviceUnits(16));
+            if (_root.RowStyles.Count >= 7)
+            {
+                _root.RowStyles[4].Height = LogicalToDeviceUnits(28);
+                _root.RowStyles[5].Height = LogicalToDeviceUnits(140);
+            }
+        }
+
+        if (_networkLabel != null)
+            _networkLabel.Margin = new Padding(0, 0, LogicalToDeviceUnits(8), 0);
+
+        ConfigureButton(_close, 85);
+        ConfigureButton(_revoke, 125);
+        ConfigureButton(_copy, 90);
+        ConfigureButton(_newCode, 90);
+        ConfigureButton(_firewall, 100);
+
+        AdjustDeviceColumnWidths();
     }
 
     private void PopulateAddresses()
@@ -293,6 +382,7 @@ public sealed class PairingForm : Form
         PopulateAddresses();
         RegenerateQr();
         _refresh.Start();
+        RescaleLayout();
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)

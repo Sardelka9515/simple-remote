@@ -32,16 +32,19 @@ Windows 10 version 1903 or newer. Nothing to install on the phone.
 dotnet run --project src/SimpleRemote.Host
 ```
 
-Publish a standalone executable (no .NET runtime needed on the target machine):
+Publish a Native AOT binary (instant startup, pure native machine code, ~33 MB standalone executable):
+
+```bash
+dotnet publish src/SimpleRemote.Host -c Release -r win-x64 -p:PublishAot=true -o publish
+```
+
+Alternatively, publish as a single-file trimmed app:
 
 ```bash
 dotnet publish src/SimpleRemote.Host -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
 ```
 
-That produces a single `SimpleRemote.exe` of roughly 160 MB. The web UI is compiled into the
-executable as embedded resources, so there is genuinely nothing beside it to copy. If the target
-machine already has the .NET 10 runtime, drop `--self-contained true` for a ~2 MB executable
-instead.
+The web UI is compiled into the executable as embedded resources, so there is genuinely nothing beside it to copy. If the target machine already has the .NET 10 runtime, drop `--self-contained true` for a ~2 MB executable instead.
 
 Run the tests:
 

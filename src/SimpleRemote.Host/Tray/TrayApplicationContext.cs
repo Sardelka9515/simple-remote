@@ -48,7 +48,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         _tray = new NotifyIcon
         {
-            Icon = AppIcon.Create(connected: false),
+            Icon = AppIcon.Create(connected: false, SystemInformation.SmallIconSize.Width),
             Text = "Simple Remote",
             Visible = true,
             ContextMenuStrip = menu,
@@ -78,7 +78,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             : $"Waiting on port {_host.Port}";
 
         var previous = _tray.Icon;
-        _tray.Icon = AppIcon.Create(connected);
+        _tray.Icon = AppIcon.Create(connected, SystemInformation.SmallIconSize.Width);
         previous?.Dispose();
 
         _tray.Text = connected ? $"Simple Remote - {count} connected" : "Simple Remote - waiting";

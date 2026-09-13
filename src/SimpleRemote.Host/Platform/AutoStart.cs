@@ -54,5 +54,5 @@ public static class AutoStart
     /// build and a single-file publish, where Assembly.Location returns an empty string.
     /// </summary>
     public static string ExecutablePath =>
-        Environment.ProcessPath ?? System.Reflection.Assembly.GetExecutingAssembly().Location;
+        Environment.ProcessPath ?? AppContext.BaseDirectory;
 }

@@ -23,6 +23,11 @@
          pipelines keeps the publish folder to exactly one file. -->
     <StaticWebAssetsEnabled>false</StaticWebAssetsEnabled>
     <IsTransformWebConfigDisabled>true</IsTransformWebConfigDisabled>
+
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+
+    <!-- Allows Native AOT / Trimming with Windows Forms -->
+    <_SuppressWinFormsTrimError>true</_SuppressWinFormsTrimError>
   </PropertyGroup>
 
   <ItemGroup>
