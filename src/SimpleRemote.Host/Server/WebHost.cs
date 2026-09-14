@@ -44,6 +44,12 @@ public sealed class WebHost(RemoteServer server)
             // Frequent small frames also stop phone Wi-Fi power-save from parking the radio
             // between gestures, which is a real and easily-missed source of stutter.
             KeepAliveInterval = TimeSpan.FromSeconds(15),
+
+            // Without a timeout the keep-alive only sends, it never notices silence. A phone that
+            // slept or left the network leaves no FIN behind, so its connection would sit in the
+            // hub - counted in the tray and broadcast to - until a send happened to fail. The
+            // browser answers these pings itself, even for a backgrounded tab.
+            KeepAliveTimeout = TimeSpan.FromSeconds(10),
         });
 
         MapStaticFiles(_app);

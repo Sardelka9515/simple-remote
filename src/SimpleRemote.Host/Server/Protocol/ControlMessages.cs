@@ -37,6 +37,12 @@ public sealed class AuthResultMessage
     public string T => "authResult";
     public bool Ok { get; set; }
     public string? Reason { get; set; }
+
+    /// <summary>
+    /// The failure is temporary (throttling) and the credentials are still valid. Without this the
+    /// phone cannot tell "try later" from "unpaired" and would discard a working pairing.
+    /// </summary>
+    public bool Retry { get; set; }
 }
 
 public sealed class MediaStateMessage

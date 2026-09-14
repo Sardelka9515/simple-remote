@@ -79,7 +79,25 @@
   }
 
   function clearCreds() {
-    try { localStorage.removeItem(STORE_KEY); } catch (err) { /* private mode */ }
+    try {
+      localStorage.removeItem(STORE_KEY);
+      localStorage.removeItem(CONFIG_KEY);
+    } catch (err) { /* private mode */ }
+  }
+
+  // The last config the host sent, so layouts and shortcuts are on screen the moment the page
+  // opens instead of only after a connection succeeds - which, right after waking from standby, can
+  // take a few seconds and used to leave a layout tab with nothing on it.
+  const CONFIG_KEY = 'simpleremote.config';
+  const TAB_KEY = 'simpleremote.tab';
+
+  function loadCachedConfig() {
+    try {
+      const raw = localStorage.getItem(CONFIG_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (err) {
+      return null;
+    }
   }
 
   function showGate(title, text, retry) {
@@ -140,6 +158,13 @@
 
     if (creds.host) $('host').textContent = creds.host;
 
+    const cached = loadCachedConfig();
+    if (cached) applyConfig(cached);
+
+    let savedTab = null;
+    try { savedTab = localStorage.getItem(TAB_KEY); } catch (err) { /* private mode */ }
+    if (savedTab && tabExists(savedTab)) selectTab(savedTab, { restoring: true });
+
     hideGate();
     link.connect(creds);
     requestWakeLock();
@@ -169,13 +194,37 @@
   });
 
   link.on('config', (message) => {
+    applyConfig(message);
+    try { localStorage.setItem(CONFIG_KEY, JSON.stringify(message)); } catch (err) { /* private mode */ }
+  });
+
+  // What is currently drawn, so a reconnect that resends an identical config changes nothing.
+  // Rebuilding would throw away the page under the user's finger - including a trackpad mid-drag.
+  let renderedShortcuts = null;
+  let renderedLayouts = null;
+
+  function applyConfig(message) {
     // Merged rather than replaced: a field the host omits would otherwise become undefined, and
     // an undefined timeout or gain silently breaks the gesture it belongs to.
     if (message.pointer) P = Object.assign({}, P, message.pointer);
     if (message.hostName) $('host').textContent = message.hostName;
-    renderShortcuts(message.shortcuts || []);
-    renderLayouts(message.layouts || []);
-  });
+
+    const shortcuts = JSON.stringify(message.shortcuts || []);
+    if (shortcuts !== renderedShortcuts) {
+      renderedShortcuts = shortcuts;
+      renderShortcuts(message.shortcuts || []);
+    }
+
+    const layouts = JSON.stringify(message.layouts || []);
+    if (layouts !== renderedLayouts) {
+      renderedLayouts = layouts;
+      renderLayouts(message.layouts || []);
+
+      // Rebuilding removed the page that was showing. Put the same one back if it still exists,
+      // otherwise fall back to the touchpad rather than leaving a blank screen.
+      selectTab(tabExists(currentTab) ? currentTab : 'pad', { restoring: true });
+    }
+  }
 
   link.on('toast', (message) => toast(message.s, message.kind));
 
@@ -199,13 +248,32 @@
     if (tab) selectTab(tab.dataset.tab);
   });
 
-  function selectTab(id) {
+  let currentTab = 'pad';
+
+  function tabExists(id) {
+    return Array.from(document.querySelectorAll('.page')).some((page) => page.dataset.page === id);
+  }
+
+  /**
+   * Shows one page. `restoring` is for programmatic re-selection (page load, a layout rebuild),
+   * which neither records the choice nor raises the keyboard.
+   */
+  function selectTab(id, options) {
+    const restoring = options && options.restoring;
+    currentTab = id;
+
     for (const tab of document.querySelectorAll('.tab')) {
       tab.classList.toggle('active', tab.dataset.tab === id);
     }
     for (const page of document.querySelectorAll('.page')) {
       page.hidden = page.dataset.page !== id;
     }
+
+    if (restoring) return;
+
+    // Remembered so a reload - or the browser discarding a backgrounded tab - lands on the same
+    // page, e.g. straight back on the Netflix layout.
+    try { localStorage.setItem(TAB_KEY, id); } catch (err) { /* private mode */ }
 
     // Opening the Keyboard tab almost always means "I want to type", so raise the phone keyboard
     // straight away. This has to run synchronously inside the tap handler - mobile browsers only
@@ -1481,10 +1549,16 @@
       return;
     }
 
-    // Coming back from the lock screen: the socket is usually dead and the wake lock released.
+    // Coming back from the lock screen: the wake lock was released, and the socket may be dead
+    // while still claiming to be open. revive() probes it rather than trusting its state.
     requestWakeLock();
-    if (link.state === 'closed') link.connect();
+    link.revive();
   });
+
+  // The network coming back, or the page being restored from the back/forward cache, are the other
+  // two moments a connection is known to be stale.
+  window.addEventListener('online', () => link.revive());
+  window.addEventListener('pageshow', (event) => { if (event.persisted) link.revive(); });
 
   // The page is a control surface, not a document: suppress the browser gestures that would
   // otherwise fire on double-taps and long-presses.

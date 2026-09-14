@@ -141,6 +141,10 @@ const documentStub = {
 const sent = [];          // every frame the client sends
 let socket = null;
 
+// What the fake host answers. Scenarios swap these to simulate a changed config or throttling.
+let hostLayouts = FIXTURE_LAYOUTS;
+let hostAuthResult = { t: 'authResult', ok: true };
+
 class FakeWebSocket {
   constructor(url) {
     this.url = url;
@@ -157,12 +161,14 @@ class FakeWebSocket {
       if (msg.t === 'auth') {
         // Authenticate, then deliver the config the real host would send.
         setImmediate(() => {
-          this.onmessage({ data: JSON.stringify({ t: 'authResult', ok: true }) });
+          if (!this.onmessage) return;
+          this.onmessage({ data: JSON.stringify(hostAuthResult) });
+          if (!hostAuthResult.ok || !this.onmessage) return;
           this.onmessage({ data: JSON.stringify({
             t: 'config',
             hostName: 'TEST',
             shortcuts: [],
-            layouts: FIXTURE_LAYOUTS,
+            layouts: hostLayouts,
             pointer: { sensitivity: 0.55, acceleration: 0.4, maxSpeed: 3, scrollSpeed: 1,
                        naturalScroll: true, tapHoldMs: 200, screenWidth: 1920, screenHeight: 1080 },
           }) });
@@ -211,6 +217,7 @@ const sandbox = {
 };
 sandbox.window = sandbox;
 sandbox.globalThis = sandbox;
+sandbox.addEventListener = () => {};
 
 vm.createContext(sandbox);
 for (const file of ['protocol.js', 'app.js']) {
@@ -469,6 +476,85 @@ async function main() {
   keysTab.dataset.tab = 'keys';
   byId('tabs').dispatch('click', { target: keysTab, preventDefault() {} });
   results.push(['keyboard tab focus', `focus calls=${focused}`, 'expect focus calls=1', '']);
+
+  // ---- connection recovery ----------------------------------------------------
+
+  const waitMs = (ms) => new Promise((r) => setTimeout(r, ms));
+  const visiblePage = () => {
+    const shown = documentStub.querySelectorAll('.layout-page').filter((p) => !p.hidden);
+    return shown.length ? shown[0].dataset.page : '(none)';
+  };
+
+  // 13. A reconnect that resends the same config leaves the layout page on screen, untouched.
+  byId('tabs').dispatch('click', { target: documentStub.querySelectorAll('.layout-tab')[0], preventDefault() {} });
+  const pageBefore = documentStub.querySelectorAll('.layout-page')[0];
+  socket.close();                    // host drops the socket; the client backs off and reconnects
+  await waitMs(450);
+  results.push(['reconnect keeps page',
+    `${visiblePage()} same=${documentStub.querySelectorAll('.layout-page')[0] === pageBefore}`,
+    'expect layout:netflix same=true', '']);
+
+  // 14. A reconnect with a changed layout rebuilds it - and still shows it instead of a blank screen.
+  hostLayouts = JSON.parse(JSON.stringify(FIXTURE_LAYOUTS));
+  hostLayouts[0].label = 'Netflix (edited)';
+  socket.close();
+  await waitMs(450);
+  results.push(['rebuilt page shown', visiblePage(), 'expect layout:netflix',
+    `cached=${JSON.parse(sandbox.localStorage.getItem('simpleremote.config')).layouts[0].label} tab=${sandbox.localStorage.getItem('simpleremote.tab')}`]);
+  hostLayouts = FIXTURE_LAYOUTS;
+
+  // The transport, driven directly with a controllable clock.
+  const creds = { deviceId: 'd', token: 't', name: 'test' };
+  let clock = 50000;
+  const probe = new sandbox.RemoteLink();
+  probe._clock = () => clock;
+  probe.connect(creds);
+  await waitTicks(); await waitTicks();
+
+  // 15. After standby the socket still says OPEN but nothing comes back: an unanswered ping must
+  //     end in a fresh socket, and the dead one's late onclose must not disturb it.
+  const deadSocket = socket;
+  probe._tick();                     // ping, never answered by the fake host
+  clock += 5000;
+  probe._tick();
+  const replaced = socket !== deadSocket;
+  if (deadSocket.onclose) deadSocket.onclose();
+  await waitTicks(); await waitTicks();
+  results.push(['dead socket replaced', `replaced=${replaced} state=${probe.state}`,
+    'expect replaced=true state=open', '']);
+
+  // 16. A healthy socket in a throttled background tab (one tick a minute) is not declared dead.
+  const liveSocket = socket;
+  probe._tick();
+  const pong = new ArrayBuffer(5);
+  new DataView(pong).setUint8(0, 0x81);
+  socket.onmessage({ data: pong });
+  clock += 60000;
+  probe._tick();
+  results.push(['quiet socket kept', `kept=${socket === liveSocket}`, 'expect kept=true', '']);
+
+  // 17. Waking up mid-connect restarts the connect instead of waiting on a socket from before sleep.
+  //     (Checked synchronously, before the fake socket gets a chance to open.)
+  probe.close();
+  const hung = new sandbox.RemoteLink();
+  hung.connect(creds);
+  const hungSocket = socket;
+  hung.revive();
+  results.push(['revive restarts connect', `restarted=${socket !== hungSocket} state=${hung.state}`,
+    'expect restarted=true state=connecting', `old handlers detached=${hungSocket.onopen === null}`]);
+  hung.close();
+
+  // 18. Throttled auth is "try later", not "unpaired": credentials survive and a retry is queued.
+  hostAuthResult = { t: 'authResult', ok: false, reason: 'Too many attempts', retry: true };
+  const throttled = new sandbox.RemoteLink();
+  let unpaired = 0;
+  throttled.on('authFailed', () => unpaired++);
+  throttled.connect(creds);
+  await waitTicks(); await waitTicks();
+  results.push(['throttled auth retries', `unpaired=${unpaired} retry=${Boolean(throttled._retryTimer)} creds=${Boolean(throttled._creds)}`,
+    'expect unpaired=0 retry=true creds=true', '']);
+  throttled.close();
+  hostAuthResult = { t: 'authResult', ok: true };
 
   console.log('');
   let failed = 0;

@@ -124,7 +124,7 @@ public sealed class WsConnection(WebSocket socket, RemoteServer server, IPAddres
     {
         if (server.IsAuthThrottled(remoteAddress))
         {
-            await SendJsonAsync(new AuthResultMessage { Ok = false, Reason = "Too many attempts" },
+            await SendJsonAsync(new AuthResultMessage { Ok = false, Reason = "Too many attempts", Retry = true },
                 AppJson.Default.AuthResultMessage, token).ConfigureAwait(false);
             return false;
         }
