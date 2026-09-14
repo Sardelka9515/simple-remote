@@ -172,8 +172,9 @@ html, body {
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  flex: 0 0 auto;
+  flex: 0 0 52px;
 }
+.speed-row + .speed-row { margin-top: -2px; }
 
 /* ---------- keyboard ---------- */
 

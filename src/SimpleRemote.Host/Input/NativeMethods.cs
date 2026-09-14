@@ -76,4 +76,26 @@ internal static partial class NativeMethods
 
     [LibraryImport("user32.dll")]
     internal static partial nint GetMessageExtraInfo();
+
+    // High-resolution waitable timer (Windows 10 1803+). Thread.Sleep and ordinary timers tick at
+    // the 15.6ms system clock, far too coarse to pace motion between 16ms phone frames.
+    public const uint CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002;
+    public const uint TIMER_ALL_ACCESS = 0x001F0003;
+    public const uint INFINITE = 0xFFFFFFFF;
+
+    [LibraryImport("kernel32.dll", EntryPoint = "CreateWaitableTimerExW", SetLastError = true)]
+    internal static partial nint CreateWaitableTimerEx(nint timerAttributes, nint timerName, uint flags, uint desiredAccess);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool SetWaitableTimer(
+        nint timer, in long dueTime, int period, nint completionRoutine, nint argToCompletionRoutine,
+        [MarshalAs(UnmanagedType.Bool)] bool resume);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    internal static partial uint WaitForSingleObject(nint handle, uint milliseconds);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool CloseHandle(nint handle);
 }

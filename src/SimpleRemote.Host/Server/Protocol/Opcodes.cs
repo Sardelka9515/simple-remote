@@ -13,6 +13,13 @@ public static class Opcodes
     public const byte Key = 0x04;         // u16 vk, u8 down
     public const byte Ping = 0x05;        // u32 seq
 
+    /// <summary>
+    /// When the phone produced the motion that follows in the same message: u32 client time in
+    /// tenths of a millisecond, wrapping. Lets the host replay motion at the pace it was made rather
+    /// than the pace Wi-Fi happened to deliver it.
+    /// </summary>
+    public const byte FrameTime = 0x06;   // u32 time (0.1 ms)
+
     // Server -> client
     public const byte Pong = 0x81;        // u32 seq
 
@@ -24,6 +31,7 @@ public static class Opcodes
         Scroll => 5,
         Key => 4,
         Ping => 5,
+        FrameTime => 5,
         Pong => 5,
         _ => -1,
     };

@@ -42,6 +42,11 @@
       <input id="speed" class="vol" type="range" min="25" max="300" step="5" value="100">
       <span id="speedval" class="volval">100%</span>
     </div>
+    <div class="speed-row">
+      <span class="speed-label">Smooth</span>
+      <input id="smoothing" class="vol" type="range" min="0" max="100" step="5" value="50">
+      <span id="smoothingval" class="volval">50%</span>
+    </div>
   </section>
 
   <!-- Keyboard -->
@@ -156,4 +161,5 @@
 <div id="toast" class="toast" hidden></div>
 
 <script src="protocol.js"></script>
+<script src="motion.js"></script>
 <script src="app.js"></script>

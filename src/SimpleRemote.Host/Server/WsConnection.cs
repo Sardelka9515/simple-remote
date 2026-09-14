@@ -27,6 +27,9 @@ public sealed class WsConnection(WebSocket socket, RemoteServer server, IPAddres
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private readonly CancellationTokenSource _closing = new();
 
+    /// <summary>Paces this phone's motion; created on authentication, so a rejected socket starts no thread.</summary>
+    private MotionPlayer? _motion;
+
     public string? DeviceId { get; private set; }
     public string? DeviceName { get; private set; }
     public bool Authenticated => DeviceId is not null;
@@ -71,6 +74,7 @@ public sealed class WsConnection(WebSocket socket, RemoteServer server, IPAddres
         finally
         {
             ArrayPool<byte>.Shared.Return(buffer);
+            _motion?.Dispose();
             server.Remove(this);
             await CloseQuietlyAsync().ConfigureAwait(false);
             _sendLock.Dispose();
@@ -156,6 +160,9 @@ public sealed class WsConnection(WebSocket socket, RemoteServer server, IPAddres
 
         if (!string.IsNullOrWhiteSpace(message.Name)) server.Devices.Rename(device.Id, message.Name);
 
+        var pointer = server.Config.Current.Pointer;
+        _motion = new MotionPlayer(server.Injector, pointer.NetworkSmoothing, pointer.MaxNetworkBufferMs);
+
         DeviceId = device.Id;
         DeviceName = device.Name;
         server.RecordAuthSuccess(remoteAddress);
@@ -183,7 +190,11 @@ public sealed class WsConnection(WebSocket socket, RemoteServer server, IPAddres
         // network rather than however long this batch of input happened to take.
         for (var i = 0; i < pingCount; i++) QueuePong(pings[i]);
 
-        if (eventCount > 0) server.Injector.Inject(events[..eventCount]);
+        if (eventCount > 0)
+        {
+            if (_motion is not null) _motion.Submit(events[..eventCount]);
+            else server.Injector.Inject(events[..eventCount]);
+        }
 
         // A malformed frame means this message is garbage, not that the connection is. Events
         // decoded before the fault were well-formed and have already been applied.

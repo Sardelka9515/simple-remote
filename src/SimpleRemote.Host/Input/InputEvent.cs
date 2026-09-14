@@ -6,6 +6,9 @@ public enum InputKind : byte
     MouseButton,
     Scroll,
     Key,
+
+    /// <summary>Not input: stamps the motion after it with the phone's clock. A is the raw u32.</summary>
+    FrameTime,
 }
 
 public enum MouseButton : byte
@@ -33,6 +36,7 @@ public readonly struct InputEvent(InputKind kind, int a, int b)
     public static InputEvent Button(MouseButton button, bool down) => new(InputKind.MouseButton, (int)button, down ? 1 : 0);
     public static InputEvent Scroll(int dx, int dy) => new(InputKind.Scroll, dx, dy);
     public static InputEvent Key(int vk, bool down) => new(InputKind.Key, vk, down ? 1 : 0);
+    public static InputEvent FrameTime(uint tenthsOfMs) => new(InputKind.FrameTime, unchecked((int)tenthsOfMs), 0);
 
     public override string ToString() => $"{Kind}({A},{B})";
 }

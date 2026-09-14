@@ -319,20 +319,6 @@
   let scrollVelocity = 0;
   let momentumHandle = null;
 
-  /**
-   * Interpolated-emission state.
-   *
-   * Motion is no longer sent from inside the pointermove handler. Instead the finger path is
-   * resampled once per animation frame at a fixed point in time, and the delta between successive
-   * resample points is what gets sent. For a constant finger speed that produces equal deltas at
-   * equal intervals, whereas emitting whatever arrived in each frame produces uneven steps - one
-   * frame carries one touch sample, the next carries three.
-   */
-  let emitting = false;
-  let emitTime = 0;
-  let emitX = 0;
-  let emitY = 0;
-
   /** null | 'move' | 'scroll' - which consumer the interpolated delta feeds. */
   let gestureMode = null;
 
@@ -363,99 +349,34 @@
   const WHEEL_PER_PX = 4;
 
   /**
-   * Timestamped sample history, used to estimate finger velocity.
+   * The smoothing pipeline lives in motion.js: filter, path history, resampling. This file only
+   * feeds it samples and routes what comes out to the cursor or the wheel.
    *
-   * Velocity must NOT be taken from the gap between two consecutive events. Browsers deliver
-   * pointermove at irregular intervals - 1ms here, 20ms there, for identical physical motion -
-   * so distance/dt over one event pair swings by an order of magnitude sample to sample. Feeding
-   * that into an acceleration curve is precisely what makes the cursor jitter.
-   *
-   * Instead every sample is recorded with its own timestamp and velocity is measured across a
-   * fixed time window, which is stable regardless of how the events happened to be delivered.
+   * One path serves every surface, since only one gesture can be in progress at a time.
    */
   const VELOCITY_WINDOW_MS = 45;
 
-  /** Retained longer than the velocity window, because interpolation reads into the recent past. */
-  const HISTORY_MS = 200;
+  /** Per-device Smoothing slider, 0..1. Kept on the phone for the same reason as Speed. */
+  let smoothingLevel = 0.5;
+  try {
+    const saved = parseFloat(localStorage.getItem('simpleremote.smoothing'));
+    if (saved >= 0 && saved <= 1) smoothingLevel = saved;
+  } catch (err) { /* private mode */ }
 
-  let samples = [];
+  const path = new window.Motion.MotionPath({ smoothing: smoothingLevel });
+  const resampler = new window.Motion.Resampler(path, new window.Motion.DelayEstimator());
 
-  /** Smoothed gain, so the curve cannot step discontinuously between frames. */
-  let gainSmoothed = 0;
+  /** Eases the pointer gain so the acceleration curve cannot step between frames. */
+  const gainSmoother = new window.Motion.Smoother(50);
 
   function resetSampling() {
-    samples = [];
-    gainSmoothed = 0;
-    emitting = false;
+    path.reset();
+    resampler.reset();
+    gainSmoother.reset();
   }
 
   function pushSample(x, y, t) {
-    samples.push({ x: x, y: y, t: t });
-    while (samples.length > 2 && t - samples[0].t > HISTORY_MS) samples.shift();
-  }
-
-  /** Finger velocity in CSS px per ms, measured across the velocity window. */
-  function windowedVelocity() {
-    if (samples.length < 2) return { x: 0, y: 0, speed: 0 };
-
-    const last = samples[samples.length - 1];
-
-    // Oldest sample still inside the window, rather than the oldest retained.
-    let i = samples.length - 1;
-    while (i > 0 && last.t - samples[i - 1].t <= VELOCITY_WINDOW_MS) i--;
-
-    const first = samples[i];
-    const dt = last.t - first.t;
-    if (dt <= 0) return { x: 0, y: 0, speed: 0 };
-
-    const vx = (last.x - first.x) / dt;
-    const vy = (last.y - first.y) / dt;
-    return { x: vx, y: vy, speed: Math.hypot(vx, vy) };
-  }
-
-  /**
-   * The finger position at an arbitrary time, linearly interpolated between the two samples that
-   * bracket it.
-   *
-   * Deliberately does not extrapolate past the newest sample: guessing where the finger went next
-   * overshoots and then corrects, which looks exactly like the jitter this is meant to remove.
-   * Clamping instead means a stalled finger simply stops.
-   */
-  function pathAt(t) {
-    if (samples.length === 0) return null;
-
-    const first = samples[0];
-    const last = samples[samples.length - 1];
-    if (t <= first.t) return { x: first.x, y: first.y };
-    if (t >= last.t) return { x: last.x, y: last.y };
-
-    for (let i = samples.length - 1; i > 0; i--) {
-      const a = samples[i - 1];
-      const b = samples[i];
-      if (t >= a.t && t <= b.t) {
-        const span = b.t - a.t;
-        const f = span > 0 ? (t - a.t) / span : 0;
-        return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f };
-      }
-    }
-
-    return { x: last.x, y: last.y };
-  }
-
-  /**
-   * How far behind the newest sample to interpolate.
-   *
-   * Interpolation needs a sample on both sides of the target time, so the target has to lag the
-   * input stream by a little over one sample interval. That lag is the entire cost of this
-   * technique, so it is measured rather than guessed: a 120Hz digitizer gets ~12ms, a 60Hz one
-   * ~25ms, instead of everyone paying the worst case.
-   */
-  function interpolationDelay() {
-    if (samples.length < 3) return 16;
-
-    const span = samples[samples.length - 1].t - samples[0].t;
-    const mean = span / (samples.length - 1);
-    return Math.min(Math.max(mean * 1.5, 8), 28);
+    path.add(x, y, t);
   }
 
   /**
@@ -683,43 +604,26 @@
 
     flushRemainingMotion();
     gestureMode = mode;
-    emitting = false;
+    resampler.reset();
   }
 
   /**
-   * Resamples the finger path at a fixed point in time and sends the delta since the last
-   * resample. Runs once per animation frame, immediately before the transport flushes.
+   * Runs once per animation frame, immediately before the transport flushes: reads the smoothed
+   * path at a steady point behind real time and sends the distance since the previous frame.
+   *
+   * frameTime is the animation frame's own timestamp, not performance.now() inside the callback.
+   * Callbacks start at slightly different moments within a frame, and reading the path at those
+   * moments puts that wobble straight into the step sizes.
    */
-  function emitFrame() {
-    if (!gestureMode || samples.length < 2) return;
+  function emitFrame(frameTime) {
+    if (!gestureMode) return;
 
-    const target = performance.now() - interpolationDelay();
-    const point = pathAt(target);
-    if (!point) return;
-
-    // First frame of a gesture only anchors: there is no previous point to difference against.
-    if (!emitting) {
-      emitting = true;
-      emitTime = target;
-      emitX = point.x;
-      emitY = point.y;
-      return;
-    }
-
-    if (target <= emitTime) return;
-
-    const dx = point.x - emitX;
-    const dy = point.y - emitY;
-    emitTime = target;
-    emitX = point.x;
-    emitY = point.y;
-
-    emitMotion(dx, dy);
+    const time = typeof frameTime === 'number' ? frameTime : performance.now();
+    const delta = resampler.frame(time);
+    if (delta) emitMotion(delta.dx, delta.dy, time);
   }
 
-  function emitMotion(dx, dy) {
-    if (dx === 0 && dy === 0) return;
-
+  function emitMotion(dx, dy, time) {
     if (gestureMode === 'scroll') {
       const factor = WHEEL_PER_PX * P.scrollSpeed * speedScale;
       const direction = P.naturalScroll ? 1 : -1;
@@ -727,34 +631,18 @@
 
       // Fling velocity from the window, not from one event pair: the latter makes identical
       // flicks coast wildly different distances.
-      scrollVelocity = windowedVelocity().y * factor * direction;
+      scrollVelocity = path.velocity(VELOCITY_WINDOW_MS).y * factor * direction;
       return;
     }
 
-    // Evaluated once per emission: it advances the smoothing filter.
-    const gain = pointerGain();
+    const gain = pointerGain(time);
     link.moveBy(dx * gain, dy * gain);
   }
 
-  /**
-   * Sends whatever is left between the last resample point and the newest sample.
-   *
-   * Interpolating behind the input stream means the final fraction of a gesture has not been sent
-   * when the finger lifts. Without this the cursor lands slightly short of where the gesture
-   * actually ended, and a fast flick loses a visible chunk of its travel.
-   */
+  /** Sends the last stretch of the path, which reading behind real time has not reached yet. */
   function flushRemainingMotion() {
-    if (!emitting || samples.length === 0) return;
-
-    const last = samples[samples.length - 1];
-    const dx = last.x - emitX;
-    const dy = last.y - emitY;
-
-    emitTime = last.t;
-    emitX = last.x;
-    emitY = last.y;
-
-    emitMotion(dx, dy);
+    const delta = resampler.flush();
+    if (delta) emitMotion(delta.dx, delta.dy, performance.now());
   }
 
   function endPointer(event) {
@@ -846,31 +734,39 @@
    * screen-relative (see screenFit) so one sensitivity value feels the same on a laptop panel and
    * a 4K desktop.
    *
-   * The result is low-pass filtered. Even with a windowed velocity the curve still moves as the
-   * finger accelerates, and an abrupt change in gain mid-gesture reads as the cursor twitching;
-   * easing it over a few samples keeps the response smooth without adding perceptible lag.
+   * The velocity comes from the filtered path, and the result is eased on a 50ms time constant:
+   * even a clean velocity moves the curve as the finger accelerates, and an abrupt change in gain
+   * mid-gesture reads as the cursor twitching.
    *
-   * Has a side effect on the filter state, so call it exactly once per batch of motion.
+   * Advances the easing, so call it exactly once per emitted delta.
    */
-  function pointerGain() {
-    const speed = windowedVelocity().speed;
+  function pointerGain(time) {
+    const speed = path.velocity(VELOCITY_WINDOW_MS).speed;
     const target = screenFit() * P.sensitivity * speedScale
       * (1 + P.acceleration * Math.min(speed, P.maxSpeed));
 
-    gainSmoothed = gainSmoothed === 0 ? target : gainSmoothed * 0.6 + target * 0.4;
-    return gainSmoothed;
+    return gainSmoother.next(target, time);
   }
+
+  /** Wheel momentum decay: the time for the fling speed to fall to 1/e. About a second of coast. */
+  const MOMENTUM_TAU_MS = 400;
 
   function startMomentum() {
     // Below this the flick was really a slow drag, and coasting would feel like drift.
     if (Math.abs(scrollVelocity) < 0.4) return;
 
-    let velocity = scrollVelocity * 16; // per frame rather than per ms
-    const step = () => {
-      // 0.96 coasts for roughly a second, which is what makes a flick feel like it carries.
-      velocity *= 0.96;
-      if (Math.abs(velocity) < 2) { momentumHandle = null; return; }
-      link.scrollBy(0, velocity);
+    // Per millisecond, and decayed by elapsed time rather than per frame, so a flick coasts the same
+    // distance on a 60Hz phone, a 120Hz phone, and through a dropped frame.
+    let velocity = scrollVelocity;
+    let last = null;
+    const step = (frameTime) => {
+      const now = typeof frameTime === 'number' ? frameTime : performance.now();
+      const dt = last === null ? 16.7 : Math.min(Math.max(now - last, 0), 50);
+      last = now;
+
+      velocity *= Math.exp(-dt / MOMENTUM_TAU_MS);
+      if (Math.abs(velocity) * 16.7 < 2) { momentumHandle = null; return; }
+      link.scrollBy(0, velocity * dt);
       momentumHandle = requestAnimationFrame(step);
     };
     momentumHandle = requestAnimationFrame(step);
@@ -892,6 +788,18 @@
     speedScale = Number(speedInput.value) / 100;
     $('speedval').textContent = Math.round(speedScale * 100) + '%';
     try { localStorage.setItem('simpleremote.speed', String(speedScale)); } catch (err) { /* private mode */ }
+  });
+
+  // Smoothing slider: trades steadiness against responsiveness. Takes effect on the next sample.
+  const smoothingInput = $('smoothing');
+  smoothingInput.value = String(Math.round(smoothingLevel * 100));
+  $('smoothingval').textContent = Math.round(smoothingLevel * 100) + '%';
+
+  smoothingInput.addEventListener('input', () => {
+    smoothingLevel = Number(smoothingInput.value) / 100;
+    path.setSmoothing(smoothingLevel);
+    $('smoothingval').textContent = Math.round(smoothingLevel * 100) + '%';
+    try { localStorage.setItem('simpleremote.smoothing', String(smoothingLevel)); } catch (err) { /* private mode */ }
   });
 
   for (const button of document.querySelectorAll('.mb')) {

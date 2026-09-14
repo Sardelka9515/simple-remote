@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  const OP = { MOVE: 0x01, BTN: 0x02, SCROLL: 0x03, KEY: 0x04, PING: 0x05, PONG: 0x81 };
+  const OP = { MOVE: 0x01, BTN: 0x02, SCROLL: 0x03, KEY: 0x04, PING: 0x05, FRAME_TIME: 0x06, PONG: 0x81 };
 
   // Stop writing when the socket is already backed up: queueing behind a stalled send is exactly
   // the latency we are trying to avoid.
@@ -265,29 +265,32 @@
       this._pingTimer = setInterval(() => this._tick(), PING_INTERVAL_MS);
       this._ping();
 
-      if (!this._rafHandle) this._rafHandle = requestAnimationFrame(() => this._frame());
+      if (!this._rafHandle) this._rafHandle = requestAnimationFrame((time) => this._frame(time));
     }
 
     /**
      * Called once per animation frame, immediately before the buffer is flushed.
      *
      * This is where the caller resamples its input path, so motion is produced on a steady cadence
-     * instead of whenever input events happened to arrive.
+     * instead of whenever input events happened to arrive. The handler receives the animation
+     * frame's timestamp.
      */
     onFrame(handler) {
       this._frameHook = handler;
     }
 
-    _frame() {
+    _frame(time) {
       this._rafHandle = null;
+      this._frameTime = typeof time === 'number' ? time : null;
 
       if (this._frameHook) {
         // A fault in the hook must not kill the frame loop and with it the whole transport.
-        try { this._frameHook(); } catch (err) { /* keep the loop alive */ }
+        try { this._frameHook(time); } catch (err) { /* keep the loop alive */ }
       }
 
       this.flush(false);
-      if (this.state === 'open') this._rafHandle = requestAnimationFrame(() => this._frame());
+      this._frameTime = null;
+      if (this.state === 'open') this._rafHandle = requestAnimationFrame((next) => this._frame(next));
     }
 
     _scheduleRetry() {
@@ -374,6 +377,9 @@
 
     /** Mouse button. Sent immediately, behind any pending motion. */
     button(button, down) {
+      // Motion first: a click must land where the cursor was heading, not a frame short of it.
+      // (Writing the button first and letting flush append the motion used to invert this.)
+      if (this.state === 'open') this._writePendingMotion();
       this._reserve(3);
       this._u8[this._len] = OP.BTN;
       this._u8[this._len + 1] = button;
@@ -382,8 +388,9 @@
       this.flush(true);
     }
 
-    /** Virtual key. Sent immediately. */
+    /** Virtual key. Sent immediately, behind any pending motion. */
     key(vk, down) {
+      if (this.state === 'open') this._writePendingMotion();
       this._reserve(4);
       this._u8[this._len] = OP.KEY;
       this._view.setUint16(this._len + 1, vk, true);
@@ -408,21 +415,7 @@
 
       if (!force && this.ws.bufferedAmount > MAX_BUFFERED) return;
 
-      const dx = Math.trunc(this._dx);
-      const dy = Math.trunc(this._dy);
-      if (dx !== 0 || dy !== 0) {
-        this._dx -= dx;
-        this._dy -= dy;
-        this._writeMotion(OP.MOVE, dx, dy);
-      }
-
-      const sx = Math.trunc(this._sx);
-      const sy = Math.trunc(this._sy);
-      if (sx !== 0 || sy !== 0) {
-        this._sx -= sx;
-        this._sy -= sy;
-        this._writeMotion(OP.SCROLL, sx, sy);
-      }
+      this._writePendingMotion();
 
       if (this._len === 0) return;
 
@@ -432,6 +425,42 @@
         // A send on a socket that is closing throws; the close handler will reconnect.
       }
       this._len = 0;
+    }
+
+    /**
+     * Writes accumulated whole-unit motion, stamped with when it was made.
+     *
+     * The stamp is the animation frame's timestamp (or now, for a flush forced by a click). The host
+     * uses it to replay motion at the pace it was produced: Wi-Fi delivers in bursts, and injecting a
+     * burst as it lands makes the cursor jump.
+     */
+    _writePendingMotion() {
+      const dx = Math.trunc(this._dx);
+      const dy = Math.trunc(this._dy);
+      const sx = Math.trunc(this._sx);
+      const sy = Math.trunc(this._sy);
+      const move = dx !== 0 || dy !== 0;
+      const scroll = sx !== 0 || sy !== 0;
+      if (!move && !scroll) return;
+
+      // Reserved as one block, so an early send can never separate the stamp from its motion.
+      this._reserve(5 + (move ? 5 : 0) + (scroll ? 5 : 0));
+
+      const time = this._frameTime !== null && this._frameTime !== undefined ? this._frameTime : performance.now();
+      this._u8[this._len] = OP.FRAME_TIME;
+      this._view.setUint32(this._len + 1, Math.round(time * 10) >>> 0, true);
+      this._len += 5;
+
+      if (move) {
+        this._dx -= dx;
+        this._dy -= dy;
+        this._writeMotion(OP.MOVE, dx, dy);
+      }
+      if (scroll) {
+        this._sx -= sx;
+        this._sy -= sy;
+        this._writeMotion(OP.SCROLL, sx, sy);
+      }
     }
 
     _writeMotion(op, x, y) {

@@ -220,7 +220,7 @@ sandbox.globalThis = sandbox;
 sandbox.addEventListener = () => {};
 
 vm.createContext(sandbox);
-for (const file of ['protocol.js', 'app.js']) {
+for (const file of ['protocol.js', 'motion.js', 'app.js']) {
   vm.runInContext(fs.readFileSync(path.join(ROOT, file), 'utf8'), sandbox, { filename: file });
 }
 
@@ -261,6 +261,7 @@ function decode(frames) {
       else if (op === 0x03) { out.push({ op: 'scroll', dx: b.readInt16LE(i + 1), dy: b.readInt16LE(i + 3) }); i += 5; }
       else if (op === 0x04) { out.push({ op: 'key', vk: b.readUInt16LE(i + 1), down: b[i + 3] === 1 }); i += 4; }
       else if (op === 0x05) { i += 5; } // ping
+      else if (op === 0x06) { out.push({ op: 'time', t: b.readUInt32LE(i + 1) / 10 }); i += 5; }
       else { out.push({ op: 'UNKNOWN', code: op }); break; }
     }
   }
@@ -555,6 +556,121 @@ async function main() {
     'expect unpaired=0 retry=true creds=true', '']);
   throttled.close();
   hostAuthResult = { t: 'authResult', ok: true };
+
+  // 19a. Motion is stamped with the animation frame time, ahead of the motion it describes, so the
+  //      host can replay it at the pace it was made rather than the pace Wi-Fi delivered it.
+  const stamped = new sandbox.RemoteLink();
+  stamped.connect(creds);
+  await waitTicks(); await waitTicks();
+  reset();
+  stamped.moveBy(5, 3);
+  stamped._frame(1234.5);
+  const frameOps = decode(sent);
+  results.push(['motion is timestamped',
+    frameOps.map((e) => e.op).join(' ') + ` t=${frameOps[0] && frameOps[0].t}`,
+    'expect time move t=1234.5', '']);
+
+  // 19b. A click carries the motion before it, in that order - the cursor arrives, then clicks.
+  reset();
+  stamped.moveBy(7, 0);
+  stamped.button(0, true);
+  results.push(['motion precedes click', decode(sent).map((e) => e.op).join(' '), 'expect time move button', '']);
+  stamped.close();
+
+  // ---- smoothing pipeline (motion.js), measured on synthetic finger paths ----------
+
+  const Motion = sandbox.Motion;
+
+  // Deterministic noise, so a failure is reproducible rather than flaky.
+  let seed = 12345;
+  const noise = (amplitude) => {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    return (seed / 2147483648 - 0.5) * 2 * amplitude;
+  };
+
+  /**
+   * Drives a MotionPath + Resampler the way a phone does: the digitizer samples every sampleMs,
+   * but samples are only delivered in batches just before each animation frame.
+   * position(t) returns the true finger position or null while the finger is resting.
+   */
+  function simulate(options) {
+    const o = Object.assign({ smoothing: 0.5, sampleMs: 8, frameMs: 16.7, deliveryLagMs: 3, jitter: 0 }, options);
+    const motionPath = new Motion.MotionPath({ smoothing: o.smoothing });
+    if (o.unfiltered) {
+      // A cutoff far above the sample rate passes samples straight through: the pre-filter baseline.
+      motionPath._fx.minCutoff = motionPath._fy.minCutoff = 1e9;
+    }
+    const estimator = new Motion.DelayEstimator();
+    const sampler = new Motion.Resampler(motionPath, estimator);
+
+    const frames = [];
+    let nextSample = 0;
+    for (let frame = 0; frame * o.frameMs <= o.durationMs; frame++) {
+      const frameTime = frame * o.frameMs;
+      while (nextSample <= frameTime - o.deliveryLagMs) {
+        const p = o.position(nextSample);
+        if (p) motionPath.add(p.x + noise(o.jitter), p.y + noise(o.jitter), nextSample);
+        nextSample += o.sampleMs;
+      }
+      frames.push({ t: frameTime, delta: sampler.frame(frameTime), delay: estimator.delay });
+    }
+    return { frames, flush: sampler.flush(), path: motionPath, estimator };
+  }
+
+  const stats = (values) => {
+    const mean = values.reduce((s, v) => s + v, 0) / values.length;
+    const sd = Math.sqrt(values.reduce((s, v) => s + (v - mean) * (v - mean), 0) / values.length);
+    return { mean, sd };
+  };
+  const wander = (frames) => frames.reduce((s, f) => s + (f.delta ? Math.hypot(f.delta.dx, f.delta.dy) : 0), 0);
+
+  // 19. A resting finger with a pixel of digitizer noise: the raw path wanders, the smoothed one
+  //     should barely move. This is the "cursor shivers while aiming" case.
+  const still = () => ({ x: 100, y: 100 });
+  const rawWander = wander(simulate({ unfiltered: true, durationMs: 1000, position: still, jitter: 1 }).frames);
+  const smoothWander = wander(simulate({ smoothing: 0.5, durationMs: 1000, position: still, jitter: 1 }).frames);
+  results.push(['resting finger jitter', `reduced=${smoothWander < rawWander * 0.15}`, 'expect reduced=true',
+    `raw=${rawWander.toFixed(1)}px smoothed=${smoothWander.toFixed(1)}px`]);
+
+  // 20. A steady 600 px/s swipe with noise: every frame after warm-up should carry a step, and the
+  //     steps should be even. Uneven steps are what reads as "not smooth" at speed.
+  const swipe = simulate({ durationMs: 800, position: (t) => ({ x: 0.6 * t, y: 0.2 * t }), jitter: 0.5 });
+  const steady = swipe.frames.filter((f) => f.t > 150 && f.t < 750);
+  const stalls = steady.filter((f) => !f.delta).length;
+  const steps = stats(steady.filter((f) => f.delta).map((f) => Math.hypot(f.delta.dx, f.delta.dy)));
+  results.push(['steady swipe cadence', `stalls=${stalls} even=${steps.sd / steps.mean < 0.12}`,
+    'expect stalls=0 even=true', `step=${steps.mean.toFixed(2)}±${steps.sd.toFixed(2)}px delay=${swipe.estimator.delay.toFixed(1)}ms`]);
+
+  // 21. Delivery that is late by a whole frame now and then must not cause stalls once learned.
+  const lateDelivery = simulate({ durationMs: 1200, deliveryLagMs: 12, position: (t) => ({ x: 0.5 * t, y: 0 }) });
+  const lateStalls = lateDelivery.frames.filter((f) => f.t > 400 && f.t < 1150 && !f.delta).length;
+  results.push(['late delivery learned', `stalls=${lateStalls}`, 'expect stalls=0',
+    `delay=${lateDelivery.estimator.delay.toFixed(1)}ms`]);
+
+  // 22. Nothing is lost: every frame's step plus the release flush add up to where the finger stopped.
+  const easeOut = (t) => { const k = Math.min(t / 400, 1); return { x: 300 * (1 - (1 - k) * (1 - k)), y: 0 }; };
+  const landed = simulate({ durationMs: 700, position: easeOut });
+  const travelledX = landed.frames.reduce((s, f) => s + (f.delta ? f.delta.dx : 0), 0) + (landed.flush ? landed.flush.dx : 0);
+  results.push(['travel conserved', `within=${Math.abs(travelledX - 300) < 1.5}`, 'expect within=true',
+    `travelled=${travelledX.toFixed(2)}px of 300`]);
+
+  // 23. A pause mid-gesture (pointermove stops firing) is not mistaken for slow delivery. If it were,
+  //     every movement after it would lag by the length of the pause.
+  const pausing = simulate({
+    durationMs: 900,
+    position: (t) => (t > 300 && t < 500 ? null : { x: 0.4 * t, y: 0 }),
+  });
+  const delayBefore = pausing.frames.find((f) => f.t >= 290).delay;
+  const delayAfter = pausing.frames.find((f) => f.t >= 560).delay;
+  results.push(['pause not learned', `inflated=${delayAfter > delayBefore + 3}`, 'expect inflated=false',
+    `before=${delayBefore.toFixed(1)}ms after=${delayAfter.toFixed(1)}ms`]);
+
+  // 24. Latency budget at the default: how far behind the true finger the smoothed read point is,
+  //     mid-swipe at a brisk 800 px/s. Smoothing must not buy steadiness with obvious lag.
+  const brisk = simulate({ durationMs: 600, position: (t) => ({ x: 0.8 * t, y: 0 }) });
+  const readX = brisk.frames.filter((f) => f.t <= 500).reduce((s, f) => s + (f.delta ? f.delta.dx : 0), 0);
+  const lagMs = (0.8 * 500 - readX) / 0.8;
+  results.push(['lag at 800px/s', `under40ms=${lagMs < 40}`, 'expect under40ms=true', `lag=${lagMs.toFixed(1)}ms`]);
 
   console.log('');
   let failed = 0;

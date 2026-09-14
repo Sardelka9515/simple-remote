@@ -141,7 +141,9 @@ Only SHA-256 hashes of device tokens are stored, in
     "scrollSpeed": 1.0,
     "naturalScroll": true,
     "smoothScroll": true,
-    "tapHoldMs": 200
+    "tapHoldMs": 200,
+    "networkSmoothing": true,
+    "maxNetworkBufferMs": 60
   },
   "shortcuts": [
     { "id": "netflix", "label": "Netflix", "icon": "🎬",
@@ -237,6 +239,10 @@ live to both cursor and scrolling, and is saved per device — a tablet and a ph
 PC can each have their own setting. That is the intended way to tune feel; the config file below
 only moves the centre point of the slider's range.
 
+**If the cursor shivers or feels rough, raise the Smooth slider; if it feels floaty, lower it.** It
+trades steadiness against lag (see *Why the cursor does not jitter*), is saved per device, and
+applies from the next touch sample. 0% is close to unfiltered input.
+
 Under the slider, deltas are accelerated **on the phone**, where the true event timestamps are:
 
 ```
@@ -267,19 +273,28 @@ deliver `pointermove` at irregular intervals — 1 ms here, 20 ms there, for ide
 motion — so `distance / dt` over one event pair swings wildly from sample to sample. Feeding that
 into an acceleration curve is what makes a cursor twitch.
 
-Instead:
+The whole pipeline lives in `wwwroot/motion.js`, which has no DOM or transport dependencies:
 
 1. Every sample is recorded with **its own timestamp**, including the individual samples the
    browser coalesced into one delivered event (`getCoalescedEvents`). That recovers the true
-   high-rate stream and keeps total displacement exact.
-2. Velocity is measured **across a fixed 45 ms window**, which is stable no matter how the events
-   happened to be delivered.
-3. The resulting gain is **low-pass filtered**, so it eases as the finger accelerates rather than
-   stepping between frames.
+   high-rate stream.
+2. Each axis goes through a **[1€ filter](https://gery.casiez.net/1euro/)**, an adaptive low-pass
+   whose cutoff rises with speed. A nearly still finger — aiming at a small button, where a pixel
+   of digitizer noise times the pointer gain is very visible — is filtered hard; a fast swipe
+   passes almost untouched, and at that speed nobody can see a pixel of noise anyway. The Smooth
+   slider moves both of its parameters together.
+3. Velocity is measured on the filtered path **across a fixed 45 ms window**, which is stable no
+   matter how the events happened to be delivered.
+4. The resulting gain is eased on a **50 ms time constant**, so it cannot step between frames. It
+   is time-based rather than per-frame, so it behaves the same at 60 Hz and 120 Hz.
 
-Simulated against a constant-speed drag with ±3 ms of timestamp jitter, this cuts gain variance
-about ninefold (coefficient of variation 8.7% → 1.0%) while leaving the mean gain unchanged — the
-cursor stops twitching without becoming slower or laggier.
+Measured by `tests/client/gestures.js` on synthetic paths at the default setting: a resting finger
+with ±1 px of digitizer noise wanders 45 px/s unfiltered and about 5 px/s filtered (sub-pixel steps
+on the phone, a few pixels on the PC), and a steady swipe arrives as per-frame steps within ±3%.
+
+The cost is lag, and it depends on speed: roughly 10 ms of filter lag on a brisk 800 px/s swipe,
+rising to about 45 ms on a slow 100 px/s movement, on top of the interpolation delay below. That is
+why it is a slider.
 
 ### Tap-and-a-half, and why a tap does not release immediately
 
@@ -322,21 +337,56 @@ frame, that path is **resampled by linear interpolation at a fixed point in time
 between successive resample points is what gets sent — to the cursor or to the wheel, depending on
 the gesture. Equal time steps in, equal deltas out.
 
-Simulated against a constant-speed drag, per-frame motion goes from varying 6.9–19.6 px (±24%) to
-exactly 13.4 px every frame, with the mean unchanged.
+Details that matter:
 
-Three details that matter:
-
+- **Frames are timed by the animation frame's own timestamp**, not `performance.now()` inside the
+  callback, whose start wobbles within the frame and would put that wobble straight into the step
+  sizes.
 - **It never extrapolates** past the newest sample. Guessing where the finger went next overshoots
   and then corrects, which looks exactly like the jitter this is meant to remove. A stalled finger
   simply stops.
-- **The lag is measured, not guessed.** Interpolation needs a sample either side of the target
-  time, so the target lags the input by a little over one sample interval — about 12 ms on a 120 Hz
-  digitizer, ~25 ms on a 60 Hz one. That lag is the entire cost of the technique, so it is derived
-  from the observed sample rate rather than making everyone pay the worst case.
-- **The tail is flushed** when the finger lifts. Interpolating behind the stream means the last
-  fraction of a gesture is still unsent at that moment; without flushing it, the cursor lands
-  short and a fast flick visibly loses travel.
+- **The delay is learned from delivery, and held steady.** What interpolation needs is for the read
+  point never to run past the newest sample. That depends on how stale the newest sample is when a
+  frame runs — a 120 Hz digitizer delivered once per 60 Hz frame can leave it a whole frame old —
+  not on the digitizer's sample spacing, which the previous version used. The delay rises as soon as
+  a frame is shown to have run dry, relaxes by only 2% of real time, and survives across gestures.
+  An earlier version recomputed it every frame, and that moving read point showed up as speed
+  wobble on a perfectly steady swipe.
+- **A pause is not mistaken for slow delivery.** A resting finger fires no events, so a frame with
+  no new samples is only counted once the next samples arrive at normal spacing. Otherwise every
+  movement after a brief pause would lag by the length of the pause.
+- **The tail is flushed** when the finger lifts. Reading behind the stream means the last stretch of
+  a gesture is still unsent at that moment; without flushing it, the cursor lands short and a fast
+  flick visibly loses travel.
+
+### Network smoothing: why Wi-Fi bursts do not make the cursor jump
+
+Everything above makes motion leave the phone evenly. Wi-Fi does not deliver it evenly. Power-save
+wakeups, frame aggregation and TCP retransmits hold packets back and release several at once, and
+because a WebSocket is TCP, one late packet holds back everything behind it. Injected as it lands,
+a quarter second of finger movement arrives in a single step: the cursor suddenly jumps.
+
+So each motion frame carries the phone's frame timestamp (opcode `0x06`), and the host replays motion
+at the pace it was made (`Input/PlayoutBuffer.cs`, driven by `Input/MotionPlayer.cs`):
+
+- **Clock mapping.** The offset between phone and PC clocks is the smallest `arrival − sent` seen
+  recently: the packet that waited least shows the true relationship, anything slower is network
+  delay. It is relearned after a second of silence, since a phone's clock can pause while it sleeps.
+- **Adaptive playout delay** of one send interval plus the recent worst jitter, capped at
+  `maxNetworkBufferMs`. On clean Wi-Fi that is about 20 ms; it grows only while the network is
+  actually misbehaving, and relaxes afterwards.
+- **Even injection.** Each frame's delta is spread across the time it covers and injected every
+  2 ms from a high-resolution waitable timer, rather than as one step per packet.
+- **Glide, don't dump.** After a stall longer than the buffer, the backlog plays out at up to 2.5×
+  real time. Only a backlog beyond 300 ms is sent at once, where gliding would lag too badly.
+- **Clicks and keys are never delayed**, and never reordered: they first flush all pending motion,
+  so a click lands exactly where the finger put the cursor.
+
+Measured by `PlayoutBufferTests`: frames held back and released six at a time — 72 px per burst if
+injected on arrival — play out with no single 2 ms step above 4 px, and a 200 ms retransmit stall
+glides through at the same bound, with total travel exact in both.
+
+On a wired or very clean network, set `networkSmoothing` to `false` to remove the playout delay.
 
 ### Scrolling
 

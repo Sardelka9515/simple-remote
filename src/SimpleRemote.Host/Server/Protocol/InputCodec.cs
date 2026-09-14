@@ -70,6 +70,11 @@ public static class InputCodec
                     events[eventCount++] = InputEvent.Key(BinaryPrimitives.ReadUInt16LittleEndian(body), body[2] != 0);
                     break;
 
+                case Opcodes.FrameTime:
+                    if (eventCount >= events.Length) return DecodeStatus.Overflow;
+                    events[eventCount++] = InputEvent.FrameTime(BinaryPrimitives.ReadUInt32LittleEndian(body));
+                    break;
+
                 case Opcodes.Ping:
                     if (pingCount >= pings.Length) return DecodeStatus.Overflow;
                     pings[pingCount++] = BinaryPrimitives.ReadUInt32LittleEndian(body);
@@ -121,6 +126,11 @@ public static class InputCodec
                 BinaryPrimitives.WriteUInt16LittleEndian(destination[1..], (ushort)e.A);
                 destination[3] = (byte)(e.B != 0 ? 1 : 0);
                 return 4;
+
+            case InputKind.FrameTime:
+                destination[0] = Opcodes.FrameTime;
+                BinaryPrimitives.WriteUInt32LittleEndian(destination[1..], unchecked((uint)e.A));
+                return 5;
 
             default:
                 return 0;

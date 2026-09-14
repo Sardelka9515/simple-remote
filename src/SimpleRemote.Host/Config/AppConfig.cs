@@ -109,6 +109,18 @@ public sealed class PointerConfig
 
     /// <summary>Content-follows-finger, matching phone conventions.</summary>
     public bool NaturalScroll { get; set; } = true;
+
+    /// <summary>
+    /// Replay pointer and wheel motion at the pace the phone produced it, instead of as it arrives.
+    ///
+    /// Wi-Fi delivers packets in bursts, and injecting a burst at once makes the cursor jump. The
+    /// cost is a small, adaptive playout delay (see <see cref="MaxNetworkBufferMs"/>). Turn it off
+    /// on a wired or otherwise very clean network to shave that latency.
+    /// </summary>
+    public bool NetworkSmoothing { get; set; } = true;
+
+    /// <summary>The most latency network smoothing may add, in milliseconds.</summary>
+    public int MaxNetworkBufferMs { get; set; } = 60;
 }
 
 /// <summary>Loads and saves <see cref="AppConfig"/>, tolerating a missing or corrupt file.</summary>
