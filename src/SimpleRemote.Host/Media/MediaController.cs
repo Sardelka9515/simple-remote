@@ -123,6 +123,14 @@ public sealed class MediaController(InputInjector injector) : IDisposable
             var timeline = session.GetTimelineProperties();
             var props = await session.TryGetMediaPropertiesAsync();
 
+            var status = playback.PlaybackStatus switch
+            {
+                GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing => "playing",
+                GlobalSystemMediaTransportControlsSessionPlaybackStatus.Paused => "paused",
+                GlobalSystemMediaTransportControlsSessionPlaybackStatus.Stopped => "stopped",
+                _ => "unknown",
+            };
+
             var state = new MediaStateMessage
             {
                 Active = true,
@@ -130,14 +138,14 @@ public sealed class MediaController(InputInjector injector) : IDisposable
                 Artist = string.IsNullOrWhiteSpace(props?.Artist) ? props?.AlbumArtist : props.Artist,
                 Album = props?.AlbumTitle,
                 App = FriendlyAppName(session.SourceAppUserModelId),
-                Status = playback.PlaybackStatus switch
-                {
-                    GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing => "playing",
-                    GlobalSystemMediaTransportControlsSessionPlaybackStatus.Paused => "paused",
-                    GlobalSystemMediaTransportControlsSessionPlaybackStatus.Stopped => "stopped",
-                    _ => "unknown",
-                },
-                PositionMs = (long)timeline.Position.TotalMilliseconds,
+                Status = status,
+                PositionMs = EstimatePositionMs(
+                    timeline.Position,
+                    timeline.EndTime - timeline.StartTime,
+                    timeline.LastUpdatedTime,
+                    DateTimeOffset.Now,
+                    status == "playing",
+                    playback.PlaybackRate ?? 1.0),
                 DurationMs = (long)(timeline.EndTime - timeline.StartTime).TotalMilliseconds,
                 CanPlayPause = playback.Controls.IsPlayPauseToggleEnabled || playback.Controls.IsPlayEnabled,
                 CanNext = playback.Controls.IsNextEnabled,
@@ -155,6 +163,43 @@ public sealed class MediaController(InputInjector injector) : IDisposable
             // Sessions vanish mid-query when an app closes; treat that as simply nothing playing.
             return new MediaStateMessage { Active = false, Status = "unknown" };
         }
+    }
+
+    /// <summary>
+    /// Where playback actually is right now.
+    ///
+    /// SMTC's Position is a snapshot, not a live value: it is correct as of LastUpdatedTime, and
+    /// many players - browsers in particular, so every web video - only publish a new snapshot on
+    /// play, pause or seek. Reporting Position as-is while playing made the phone's progress bar
+    /// snap back to that frozen value on every poll, so it looked stuck until the next pause.
+    /// Advancing it by the time since the snapshot is what the timeline API expects of a reader.
+    /// </summary>
+    public static long EstimatePositionMs(
+        TimeSpan position,
+        TimeSpan duration,
+        DateTimeOffset lastUpdated,
+        DateTimeOffset now,
+        bool playing,
+        double rate)
+    {
+        var estimate = position;
+
+        // A player that never sets LastUpdatedTime leaves it at the default; extrapolating from
+        // year 1 would jump straight to the end.
+        if (playing && lastUpdated.Year >= 2000)
+        {
+            var elapsed = now - lastUpdated;
+            if (elapsed > TimeSpan.Zero)
+            {
+                if (!double.IsFinite(rate) || rate <= 0) rate = 1.0;
+                estimate += TimeSpan.FromTicks((long)(elapsed.Ticks * rate));
+            }
+        }
+
+        if (duration > TimeSpan.Zero && estimate > duration) estimate = duration;
+        if (estimate < TimeSpan.Zero) estimate = TimeSpan.Zero;
+
+        return (long)estimate.TotalMilliseconds;
     }
 
     /// <summary>
