@@ -36,7 +36,16 @@ public sealed class AppConfig
 
     public int Port { get; set; } = 8787;
 
-    /// <summary>HTTPS seam: flip this (plus a cert) and the whole stack follows.</summary>
+    /// <summary>
+    /// A second, HTTPS port with a self-signed certificate generated on first run. 0 disables it.
+    ///
+    /// Browsers only give motion sensors (the air mouse) to secure pages. It runs alongside the
+    /// plain HTTP port rather than replacing it, so pairing keeps working without a certificate
+    /// warning and only a phone that wants the air mouse has to accept one.
+    /// </summary>
+    public int SecurePort { get; set; } = 8788;
+
+    /// <summary>Makes the primary port itself HTTPS, with a user-supplied certificate.</summary>
     public bool UseHttps { get; set; }
     public string? CertPath { get; set; }
     public string? CertPassword { get; set; }
@@ -121,6 +130,13 @@ public sealed class PointerConfig
 
     /// <summary>The most latency network smoothing may add, in milliseconds.</summary>
     public int MaxNetworkBufferMs { get; set; } = 60;
+
+    /// <summary>
+    /// Air mouse speed multiplier. At 1.0, turning the phone about 35 degrees sweeps the cursor
+    /// across the desktop's width - roughly a comfortable wrist turn. The phone's Speed slider
+    /// multiplies this too.
+    /// </summary>
+    public double AirSensitivity { get; set; } = 1.0;
 }
 
 /// <summary>Loads and saves <see cref="AppConfig"/>, tolerating a missing or corrupt file.</summary>
@@ -226,6 +242,7 @@ public sealed class ConfigStore
 [JsonSerializable(typeof(SimpleRemote.Server.Protocol.ClipboardMessage))]
 [JsonSerializable(typeof(SimpleRemote.Server.Protocol.ToastMessage))]
 [JsonSerializable(typeof(SimpleRemote.Server.Protocol.ConfigMessage))]
+[JsonSerializable(typeof(SimpleRemote.Server.Protocol.SecureHandoffMessage))]
 [JsonSerializable(typeof(SimpleRemote.Server.ApiPairRequest))]
 [JsonSerializable(typeof(SimpleRemote.Server.ApiPairResponse))]
 [JsonSerializable(typeof(SimpleRemote.Server.ApiHealthResponse))]

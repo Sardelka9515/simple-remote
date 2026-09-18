@@ -19,9 +19,27 @@ public sealed class WebHost(RemoteServer server)
     public int Port { get; private set; }
     public bool IsHttps { get; private set; }
 
+    /// <summary>The additional HTTPS port, or 0 when it is disabled or could not be started.</summary>
+    public int SecurePort { get; private set; }
+
     public string Scheme => IsHttps ? "https" : "http";
 
     public async Task StartAsync()
+    {
+        try
+        {
+            await StartAsync(withSecurePort: true).ConfigureAwait(false);
+        }
+        catch (IOException) when (SecurePort > 0)
+        {
+            // Most likely the secure port is taken. That must not cost the user the remote
+            // altogether: come up on plain HTTP, and the air mouse explains it is unavailable.
+            await StopAsync().ConfigureAwait(false);
+            await StartAsync(withSecurePort: false).ConfigureAwait(false);
+        }
+    }
+
+    private async Task StartAsync(bool withSecurePort)
     {
         var config = server.Config.Current;
 
@@ -35,7 +53,7 @@ public sealed class WebHost(RemoteServer server)
         builder.Logging.ClearProviders();
         builder.Logging.SetMinimumLevel(LogLevel.Warning);
 
-        ConfigureKestrel(builder, config);
+        ConfigureKestrel(builder, config, withSecurePort);
 
         _app = builder.Build();
 
@@ -56,6 +74,9 @@ public sealed class WebHost(RemoteServer server)
         ApiEndpoints.Map(_app, server, this);
 
         await _app.StartAsync().ConfigureAwait(false);
+
+        // Only advertised to phones once it is really listening.
+        server.SecurePort = IsHttps ? Port : SecurePort;
     }
 
     /// <summary>
@@ -63,10 +84,16 @@ public sealed class WebHost(RemoteServer server)
     /// stack move to a secure context later without touching anything else - the client already
     /// derives its WebSocket scheme from location.protocol.
     /// </summary>
-    private void ConfigureKestrel(WebApplicationBuilder builder, AppConfig config)
+    private void ConfigureKestrel(WebApplicationBuilder builder, AppConfig config, bool withSecurePort)
     {
         Port = config.Port;
         IsHttps = config.UseHttps && !string.IsNullOrWhiteSpace(config.CertPath) && File.Exists(config.CertPath);
+
+        // When the primary port is already HTTPS there is nothing a second one would add.
+        var secureCertificate = withSecurePort && !IsHttps && config.SecurePort > 0 && config.SecurePort != config.Port
+            ? LoadSecureCertificate()
+            : null;
+        SecurePort = secureCertificate is null ? 0 : config.SecurePort;
 
         builder.WebHost.ConfigureKestrel(options =>
         {
@@ -81,7 +108,27 @@ public sealed class WebHost(RemoteServer server)
                 listen.UseHttps(System.Security.Cryptography.X509Certificates.X509CertificateLoader
                     .LoadPkcs12FromFile(config.CertPath!, config.CertPassword));
             });
+
+            if (secureCertificate is not null)
+                options.Listen(IPAddress.Any, SecurePort, listen => listen.UseHttps(secureCertificate));
         });
+    }
+
+    /// <summary>The self-signed certificate for the secure port, or null if it cannot be had.</summary>
+    private static System.Security.Cryptography.X509Certificates.X509Certificate2? LoadSecureCertificate()
+    {
+        try
+        {
+            var addresses = Net.LocalAddresses.Enumerate().Select(a => a.Address);
+            return new CertificateStore().LoadOrCreate(addresses);
+        }
+        catch (Exception ex) when (ex is System.Security.Cryptography.CryptographicException
+                                       or IOException or UnauthorizedAccessException
+                                       or PlatformNotSupportedException)
+        {
+            // A missing certificate only costs the air mouse, never the remote itself.
+            return null;
+        }
     }
 
     private static void MapStaticFiles(WebApplication app)

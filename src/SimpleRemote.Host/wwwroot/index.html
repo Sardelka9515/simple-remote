@@ -23,11 +23,34 @@
 
   <!-- Touchpad -->
   <section class="page" data-page="pad">
+    <!-- Touch drives the cursor with a finger; Motion points the phone itself (air mouse). -->
+    <div class="mode-row">
+      <div class="seg" role="group" aria-label="Pointer mode">
+        <button id="modeTouch" class="seg-btn active" type="button">Touch</button>
+        <button id="modeMotion" class="seg-btn" type="button">Motion</button>
+      </div>
+      <button id="airLock" class="lock-btn" type="button" hidden aria-pressed="false">Lock</button>
+    </div>
     <div id="pad" class="pad">
-      <div class="pad-hint">
+      <div class="pad-hint touch-hint">
         <strong>Trackpad</strong>
         <span>drag to move &middot; tap to click &middot; two fingers to scroll</span>
         <span>tap, then press and drag to move things</span>
+      </div>
+      <div class="pad-hint motion-hint">
+        <strong>Hold to point</strong>
+        <span>hold here and turn the phone to move the cursor</span>
+        <span>tap to click &middot; Lock to point hands-free</span>
+      </div>
+    </div>
+    <!-- Outside the pad on purpose: the pad captures pointers, which would swallow these taps. -->
+    <div id="securePanel" class="secure-panel" hidden>
+      <strong id="secureTitle">Motion needs a secure connection</strong>
+      <span id="secureText"></span>
+      <code id="secureDetails" class="secure-details" hidden></code>
+      <div class="secure-actions">
+        <button id="secureGo" class="btn primary" type="button">Switch to secure connection</button>
+        <button id="secureCancel" class="btn" type="button">Use touch</button>
       </div>
     </div>
     <div class="pad-buttons">
@@ -162,4 +185,5 @@
 
 <script src="protocol.js"></script>
 <script src="motion.js"></script>
+<script src="airmouse.js"></script>
 <script src="app.js"></script>

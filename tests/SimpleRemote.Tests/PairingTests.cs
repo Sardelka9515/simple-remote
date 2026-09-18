@@ -94,6 +94,18 @@ public class PairRequestSerializationTests
     }
 
     [Fact]
+    public void CamelCaseBodyBindsExistingCredential()
+    {
+        var request = JsonSerializer.Deserialize(
+            """{"pairingToken":"abc123","existingDeviceId":"d1","existingToken":"t1"}""",
+            AppJson.Default.ApiPairRequest);
+
+        Assert.NotNull(request);
+        Assert.Equal("d1", request.ExistingDeviceId);
+        Assert.Equal("t1", request.ExistingToken);
+    }
+
+    [Fact]
     public void PairResponseSerializesAsCamelCase()
     {
         var json = JsonSerializer.Serialize(
@@ -138,6 +150,38 @@ public class DeviceStoreTests : IDisposable
 
         var reloaded = new DeviceStore(_path);
         Assert.NotNull(reloaded.Verify(issued.DeviceId, issued.Token));
+    }
+
+    [Fact]
+    public void ReauthenticateRotatesTokenInPlace()
+    {
+        var store = new DeviceStore(_path);
+        var issued = store.Register("Test phone");
+
+        var reissued = store.Reauthenticate(issued.DeviceId, issued.Token);
+
+        Assert.NotNull(reissued);
+        Assert.Equal(issued.DeviceId, reissued.DeviceId);
+        Assert.NotEqual(issued.Token, reissued.Token);
+
+        // Same record, not a second one - the old token is dead and the new one works.
+        Assert.Single(store.Devices);
+        Assert.Null(store.Verify(issued.DeviceId, issued.Token));
+        Assert.NotNull(store.Verify(reissued.DeviceId, reissued.Token));
+    }
+
+    [Fact]
+    public void ReauthenticateRejectsWrongCredential()
+    {
+        var store = new DeviceStore(_path);
+        var issued = store.Register("Test phone");
+
+        Assert.Null(store.Reauthenticate(issued.DeviceId, "wrong"));
+        Assert.Null(store.Reauthenticate("wrong", issued.Token));
+        Assert.Null(store.Reauthenticate(null, null));
+
+        // The bad attempts must not have disturbed the working credential.
+        Assert.NotNull(store.Verify(issued.DeviceId, issued.Token));
     }
 
     [Fact]

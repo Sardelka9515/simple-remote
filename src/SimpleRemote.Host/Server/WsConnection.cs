@@ -247,6 +247,12 @@ public sealed class WsConnection(WebSocket socket, RemoteServer server, IPAddres
                         AppJson.Default.ToastMessage, token).ConfigureAwait(false);
                 break;
 
+            case "secureHandoff":
+                if (server.SecurePort > 0)
+                    await SendJsonAsync(new SecureHandoffMessage { Token = server.Handoff.Issue() },
+                        AppJson.Default.SecureHandoffMessage, token).ConfigureAwait(false);
+                break;
+
             case "refresh":
                 await server.Media.RefreshAsync().ConfigureAwait(false);
                 break;

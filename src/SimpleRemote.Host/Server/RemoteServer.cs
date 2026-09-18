@@ -52,6 +52,24 @@ public sealed class RemoteServer : IDisposable
     public ConfigStore Config { get; }
     public DeviceStore Devices { get; }
     public PairingTokenSource Pairing { get; }
+
+    /// <summary>
+    /// Tokens for moving an already-paired phone onto the secure port. Separate from
+    /// <see cref="Pairing"/>, which holds a single token: sharing it would let a handoff silently
+    /// invalidate the QR code on screen, or the reverse.
+    /// </summary>
+    public PairingTokenSource Handoff { get; } = new();
+
+    /// <summary>The HTTPS port actually listening, or 0. Set by the web host once it has bound.</summary>
+    public int SecurePort { get; set; }
+
+    /// <summary>Consumes a token from the QR code or from a secure handoff, whichever it is.</summary>
+    public PairingTokenKind RedeemPairingToken(string? token)
+    {
+        if (Pairing.TryRedeem(token)) return PairingTokenKind.Qr;
+        if (Handoff.TryRedeem(token)) return PairingTokenKind.Handoff;
+        return PairingTokenKind.None;
+    }
     public InputInjector Injector { get; }
     public MediaController Media { get; }
     public VolumeController Volume { get; }
@@ -153,7 +171,9 @@ public sealed class RemoteServer : IDisposable
                 TapHoldMs = Config.Current.Pointer.TapHoldMs,
                 ScreenWidth = screen.Width,
                 ScreenHeight = screen.Height,
+                AirSensitivity = Config.Current.Pointer.AirSensitivity,
             },
+            SecurePort = SecurePort,
         };
     }
 
@@ -170,4 +190,11 @@ public sealed class RemoteServer : IDisposable
         public int Count;
         public DateTimeOffset WindowStart;
     }
+}
+
+public enum PairingTokenKind
+{
+    None,
+    Qr,
+    Handoff,
 }

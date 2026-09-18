@@ -10,6 +10,14 @@ public sealed class ApiPairRequest
 {
     public string? PairingToken { get; set; }
     public string? Name { get; set; }
+
+    /// <summary>
+    /// The credential this phone already holds for this host, if any. When it still checks out,
+    /// the scan refreshes that device's token instead of registering a second entry for the same
+    /// phone.
+    /// </summary>
+    public string? ExistingDeviceId { get; set; }
+    public string? ExistingToken { get; set; }
 }
 
 public sealed class ApiPairResponse
@@ -55,7 +63,9 @@ public static class ApiEndpoints
                 return Results.BadRequest();
             }
 
-            if (!server.Pairing.TryRedeem(request?.PairingToken))
+            var redeemed = server.RedeemPairingToken(request?.PairingToken);
+
+            if (redeemed == PairingTokenKind.None)
             {
                 server.RecordAuthFailure(ctx.Connection.RemoteIpAddress);
 
@@ -66,11 +76,26 @@ public static class ApiEndpoints
 
             server.RecordAuthSuccess(ctx.Connection.RemoteIpAddress);
 
-            var name = string.IsNullOrWhiteSpace(request?.Name)
-                ? DescribeClient(ctx.Request.Headers.UserAgent.ToString())
-                : request.Name;
+            // A handoff deliberately pairs the same phone again under its secure origin as a
+            // second, labelled record (see below), so only a plain QR scan reuses an existing
+            // device - a phone that already holds a working credential for this host rescanning
+            // should refresh it in place, not add a duplicate row.
+            var issued = redeemed == PairingTokenKind.Qr
+                ? server.Devices.Reauthenticate(request?.ExistingDeviceId, request?.ExistingToken)
+                : null;
 
-            var issued = server.Devices.Register(name);
+            if (issued is null)
+            {
+                var name = string.IsNullOrWhiteSpace(request?.Name)
+                    ? DescribeClient(ctx.Request.Headers.UserAgent.ToString())
+                    : request.Name;
+
+                // A handoff pairs the same phone again under its secure origin, so it gets its own
+                // record. Labelled, so the device list does not look like a stranger paired.
+                if (redeemed == PairingTokenKind.Handoff) name += " (secure)";
+
+                issued = server.Devices.Register(name);
+            }
 
             return Results.Json(
                 new ApiPairResponse { DeviceId = issued.DeviceId, Token = issued.Token },
@@ -83,7 +108,10 @@ public static class ApiEndpoints
                 ? Results.File(bytes, contentType)
                 : Results.NotFound());
 
-        app.MapGet("/ws", async (HttpContext ctx) =>
+        // GET and CONNECT: over TLS the browser negotiates HTTP/2, and a WebSocket over HTTP/2 is an
+        // extended CONNECT request (RFC 8441), not an upgraded GET. A GET-only route answered it with
+        // 405, so the secure page loaded but the remote never connected.
+        app.MapMethods("/ws", [HttpMethods.Get, HttpMethods.Connect], async (HttpContext ctx) =>
         {
             if (!ctx.WebSockets.IsWebSocketRequest)
             {

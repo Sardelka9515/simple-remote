@@ -48,7 +48,7 @@
   /** Pointer feel, replaced by the host config message once connected. */
   let P = {
     sensitivity: 0.55, acceleration: 0.4, maxSpeed: 3.0, scrollSpeed: 1.0, naturalScroll: true,
-    tapHoldMs: 200, screenWidth: 0, screenHeight: 0,
+    tapHoldMs: 200, screenWidth: 0, screenHeight: 0, airSensitivity: 1,
   };
 
   /**
@@ -113,11 +113,17 @@
     $('app').hidden = false;
   }
 
-  async function redeem(token) {
+  async function redeem(token, existing) {
     const response = await fetch('api/pair', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ pairingToken: token }),
+      body: JSON.stringify({
+        pairingToken: token,
+        // If this phone already holds a working credential for this host, the server refreshes
+        // it in place instead of registering a second device for the same scan.
+        existingDeviceId: existing ? existing.deviceId : undefined,
+        existingToken: existing ? existing.token : undefined,
+      }),
     });
 
     if (!response.ok) return null;
@@ -129,6 +135,9 @@
   async function boot() {
     let creds = loadCreds();
 
+    // Read before the fragment is cleared: a secure handoff asks to open straight into motion mode.
+    const motionRequested = /[#&]mode=motion\b/.test(location.hash);
+
     // The pairing token rides in the fragment, so it never leaves the browser. Redeem it whenever
     // one is present, even if we already hold credentials - the user only rescans deliberately,
     // typically because the old device was revoked.
@@ -137,7 +146,7 @@
       history.replaceState(null, '', location.pathname);
       showGate('Pairing…', 'Setting this device up.');
       try {
-        const paired = await redeem(match[1]);
+        const paired = await redeem(match[1], creds);
         if (paired) {
           creds = paired;
           saveCreds(creds);
@@ -168,6 +177,7 @@
     hideGate();
     link.connect(creds);
     requestWakeLock();
+    restorePadMode(motionRequested);
   }
 
   $('gateRetry').addEventListener('click', () => location.reload());
@@ -208,6 +218,7 @@
     // an undefined timeout or gain silently breaks the gesture it belongs to.
     if (message.pointer) P = Object.assign({}, P, message.pointer);
     if (message.hostName) $('host').textContent = message.hostName;
+    if (typeof message.securePort === 'number') securePort = message.securePort;
 
     const shortcuts = JSON.stringify(message.shortcuts || []);
     if (shortcuts !== renderedShortcuts) {
@@ -501,10 +512,21 @@
       gestureStart = event.timeStamp;
       travelled = 0;
 
+      // Motion mode: pressing the screen jolts the phone, so pointing pauses the moment a finger
+      // lands (even when locked) and only engages if the finger stays. A tap therefore clicks
+      // exactly where the cursor was.
+      const motion = motionHere();
+      if (motion) setAirActive(false);
+
       // A new gesture must not inherit the previous one's velocity, or the first movement is
       // accelerated by however fast the last flick happened to be.
       resetSampling();
-      pushSample(point.x, point.y, point.t);
+      if (motion) {
+        clearTimeout(airTimer);
+        airTimer = setTimeout(engageAirHold, AIR_ENGAGE_MS);
+      } else {
+        pushSample(point.x, point.y, point.t);
+      }
 
       // Tap-and-a-half: this press lands while the previous tap still has the button held, so it
       // adopts that button rather than pressing a new one. No second down reaches the host, so
@@ -568,7 +590,8 @@
       totalDy += y - cursor.y;
       cursor = { x: x, y: y, t: sample.timeStamp };
 
-      if (event.isPrimary) pushSample(x, y, sample.timeStamp);
+      // In motion mode a single finger is only a clutch; its travel must not reach the path.
+      if (event.isPrimary && !(motionHere() && pointers.size < 2)) pushSample(x, y, sample.timeStamp);
     }
 
     pointers.set(event.pointerId, cursor);
@@ -589,9 +612,20 @@
     if (pointers.size >= 2) {
       // Two fingers scroll. Only the primary pointer drives it - averaging every contact makes a
       // slight pinch read as scroll jitter.
-      setGestureMode('scroll');
+      if (motionHere() && gestureMode !== 'scroll') {
+        // From pointing to scrolling: the path holds angles, not finger positions, so start over.
+        clearTimeout(airTimer);
+        setAirActive(false);
+        setGestureMode('scroll');
+        path.reset();
+        resampler.reset();
+        if (event.isPrimary) pushSample(cursor.x, cursor.y, cursor.t);
+      } else {
+        setGestureMode('scroll');
+      }
     } else if (maxPointers === 1) {
-      setGestureMode('move');
+      // In motion mode the finger never moves the cursor; the air mouse does, once engaged.
+      if (!motionHere()) setGestureMode('move');
     } else {
       // Fingers lifted mid-scroll: stop driving anything rather than jerking the cursor.
       setGestureMode(null);
@@ -624,6 +658,12 @@
   }
 
   function emitMotion(dx, dy, time) {
+    if (gestureMode === 'air') {
+      const gain = airGain(time);
+      link.moveBy(dx * gain, dy * gain);
+      return;
+    }
+
     if (gestureMode === 'scroll') {
       const factor = WHEEL_PER_PX * P.scrollSpeed * speedScale;
       const direction = P.naturalScroll ? 1 : -1;
@@ -702,13 +742,478 @@
     // startMomentum has already taken the velocity it needs; clearing here stops a stale sample
     // window from seeding the next gesture.
     resetSampling();
+
+    if (motionHere() || airTimer !== null) {
+      clearTimeout(airTimer);
+      airTimer = null;
+      builtInPad.classList.remove('pointing');
+
+      // Locked: resume pointing once the phone has settled from the finger lifting off.
+      if (airLocked) airTimer = setTimeout(resumeLockedAir, AIR_SETTLE_MS);
+    }
   }
 
   // Resample the finger path on every frame, just before the transport sends.
   link.onFrame(emitFrame);
 
   // The built-in Touchpad tab. Layout pages attach their own trackpads the same way.
-  attachTrackpad($('pad'));
+  const builtInPad = $('pad');
+  attachTrackpad(builtInPad);
+
+  // ---------------------------------------------------------------- air mouse (motion mode)
+
+  /**
+   * Motion mode turns the Touchpad tab's pad into a clutch for the air mouse: hold it and turn the
+   * phone to point, or Lock to point hands-free. The gyroscope reading (airmouse.js) is fed into the
+   * same smoothing path as a finger, so filtering, frame pacing and host playout are shared.
+   *
+   * Browsers only deliver motion events to secure pages, so on plain HTTP the Motion button offers a
+   * one-tap move to the PC's HTTPS port instead.
+   */
+  const PAD_MODE_KEY = 'simpleremote.padMode';
+
+  /** Degrees of phone rotation that sweep the cursor across the desktop's width, at 1.0 sensitivity. */
+  const AIR_DEGREES_ACROSS = 35;
+
+  /**
+   * Angles are scaled up before entering the smoothing path. The 1€ filter's parameters are tuned
+   * for finger travel in CSS pixels; in raw degrees every motion would look ten times slower and
+   * the filter would lag accordingly.
+   */
+  const AIR_UNITS_PER_DEGREE = 10;
+
+  /** A press shorter than this is a tap (click), not a hold to point. */
+  const AIR_ENGAGE_MS = 150;
+
+  /** After a tap while locked, how long pointing waits for the phone to stop wobbling. */
+  const AIR_SETTLE_MS = 120;
+
+  let padMode = 'touch';
+  let airLocked = false;
+  let airTimer = null;
+  let securePort = 0;
+  let motionWatch = null;
+
+  /** How long to wait for the first usable reading. Some phones take a second or two to wake a sensor. */
+  const MOTION_WATCH_MS = 3000;
+
+  /**
+   * The active sensor feed: { name, stop() }, or null.
+   *
+   * Two browser APIs deliver the same data. The Generic Sensor API (Gyroscope + Accelerometer,
+   * Chromium) is tried first, because when it fails it says why - permission denied, no such sensor,
+   * blocked by policy. The older devicemotion event (Safari, Firefox, and the fallback) just stays
+   * silent, which left "no motion sensor data" as the only thing we could tell the user.
+   */
+  let motionSource = null;
+  let motionSourceName = 'none'; // survives the source being stopped, for the diagnostics line
+  let motionEvents = 0;
+  let motionSamples = 0;
+  let motionPermission = 'unknown';
+  let motionError = '';
+
+  const RAD_TO_DEG = 180 / Math.PI;
+
+  // devicemotion reports gravity pointing up at rest, as the spec says - except on iOS, which
+  // reports it inverted. The Generic Sensor API follows the spec everywhere it exists.
+  const isAppleMobile = /iPad|iPhone|iPod/.test(navigator.userAgent || '')
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const gyro = new window.AirMouse.GyroPointer();
+
+  /** Motion mode applies to the Touchpad tab's pad only; layout trackpads stay touch. */
+  function motionHere() {
+    return padMode === 'motion' && pad === builtInPad;
+  }
+
+  /** Starts or stops feeding the gyroscope into the path. Re-anchors on start, so nothing jumps. */
+  function setAirActive(on) {
+    if (on === (gestureMode === 'air')) return;
+
+    if (on) {
+      stopMomentum();
+      gestureMode = 'air';
+      path.reset();
+      resampler.reset();
+      gainSmoother.reset();
+    } else {
+      flushRemainingMotion();
+      gestureMode = null;
+      path.reset();
+      resampler.reset();
+    }
+    builtInPad.classList.toggle('pointing', on);
+  }
+
+  function engageAirHold() {
+    airTimer = null;
+    if (motionHere() && pointers.size === 1 && gestureMode !== 'scroll') setAirActive(true);
+  }
+
+  function resumeLockedAir() {
+    airTimer = null;
+    if (motionHere() && airLocked && pointers.size === 0) setAirActive(true);
+  }
+
+  /** One reading in devicemotion shape, whichever API it came from. */
+  function onMotionReading(reading) {
+    const sample = gyro.sample(reading);
+    if (!sample) return;
+    motionSamples++;
+    if (gestureMode === 'air') {
+      pushSample(sample.x * AIR_UNITS_PER_DEGREE, sample.y * AIR_UNITS_PER_DEGREE, sample.t);
+    }
+  }
+
+  function onDeviceMotion(event) {
+    motionEvents++;
+    onMotionReading(event);
+  }
+
+  function startDeviceMotion() {
+    gyro.gravitySign = isAppleMobile ? -1 : 1;
+    motionSourceName = 'devicemotion';
+    window.addEventListener('devicemotion', onDeviceMotion);
+    return { name: 'devicemotion', stop: () => window.removeEventListener('devicemotion', onDeviceMotion) };
+  }
+
+  /**
+   * Gyroscope + Accelerometer from the Generic Sensor API. Throws if the browser refuses outright;
+   * later failures (permission, missing hardware) arrive as error events, handled below.
+   */
+  function startGenericSensors() {
+    const rotation = new window.Gyroscope({ frequency: 60 });
+    const acceleration = new window.Accelerometer({ frequency: 60 });
+
+    const source = {
+      name: 'generic-sensor',
+      stop: () => {
+        try { rotation.stop(); } catch (err) { /* already stopped */ }
+        try { acceleration.stop(); } catch (err) { /* already stopped */ }
+      },
+    };
+
+    const onError = (event) => onSensorError(source, event && event.error);
+    rotation.addEventListener('error', onError);
+    acceleration.addEventListener('error', onError);
+
+    rotation.addEventListener('reading', () => {
+      motionEvents++;
+      if (typeof acceleration.x !== 'number') return; // gravity not known yet
+      onMotionReading({
+        timeStamp: rotation.timestamp,
+        // Radians per second about the device's x, y, z axes; devicemotion names these beta,
+        // gamma and alpha, in degrees.
+        rotationRate: { alpha: rotation.z * RAD_TO_DEG, beta: rotation.x * RAD_TO_DEG, gamma: rotation.y * RAD_TO_DEG },
+        accelerationIncludingGravity: { x: acceleration.x, y: acceleration.y, z: acceleration.z },
+      });
+    });
+
+    gyro.gravitySign = 1;
+    motionSourceName = 'generic-sensor';
+    acceleration.start();
+    rotation.start();
+    return source;
+  }
+
+  function onSensorError(source, error) {
+    if (motionSource !== source) return;
+    const name = (error && error.name) || 'Error';
+    motionError = name + (error && error.message ? ': ' + error.message : '');
+
+    if (name === 'NotAllowedError') {
+      disableMotion();
+      showMotionProblem('denied');
+      return;
+    }
+
+    // No such sensor, or blocked by policy: devicemotion is worth one more try before giving up.
+    switchToDeviceMotion();
+  }
+
+  function switchToDeviceMotion() {
+    if (motionSource) motionSource.stop();
+    motionSource = window.DeviceMotionEvent ? startDeviceMotion() : null;
+    gyro.reset();
+    if (!motionSource) {
+      disableMotion();
+      showMotionProblem('unsupported');
+      return;
+    }
+    watchMotion();
+  }
+
+  /** Gives up, with the specific reason, if no usable reading arrives in time. */
+  function watchMotion() {
+    clearTimeout(motionWatch);
+    motionWatch = setTimeout(() => {
+      if (padMode !== 'motion' || motionSamples > 0) return;
+
+      // A silent Generic Sensor feed still leaves devicemotion to try.
+      if (motionSource && motionSource.name === 'generic-sensor') {
+        switchToDeviceMotion();
+        return;
+      }
+
+      const kind = motionEvents > 0 ? 'incomplete' : 'silent';
+      disableMotion();
+      showMotionProblem(kind);
+    }, MOTION_WATCH_MS);
+  }
+
+  /** Chromium's permission state for the sensors, or 'unknown' where the names are not recognised. */
+  async function querySensorPermission() {
+    if (!navigator.permissions || typeof navigator.permissions.query !== 'function') return 'unknown';
+    try {
+      const states = await Promise.all(['accelerometer', 'gyroscope']
+        .map((name) => navigator.permissions.query({ name: name }).then((status) => status.state)));
+      if (states.includes('denied')) return 'denied';
+      return states.every((state) => state === 'granted') ? 'granted' : 'prompt';
+    } catch (err) {
+      return 'unknown'; // Safari and Firefox do not know these permission names
+    }
+  }
+
+  /** Same shape as pointerGain, in rotation terms: a quick turn accelerates like a quick swipe. */
+  function airGain(time) {
+    const degreesPerSecond = path.velocity(VELOCITY_WINDOW_MS).speed * 1000 / AIR_UNITS_PER_DEGREE;
+    const width = P.screenWidth || 1920;
+    const sensitivity = typeof P.airSensitivity === 'number' && P.airSensitivity > 0 ? P.airSensitivity : 1;
+    const target = width / AIR_DEGREES_ACROSS / AIR_UNITS_PER_DEGREE * sensitivity * speedScale
+      * (1 + P.acceleration * Math.min(degreesPerSecond / 60, P.maxSpeed));
+    return gainSmoother.next(target, time);
+  }
+
+  function paintPadMode() {
+    const motion = padMode === 'motion';
+    builtInPad.classList.toggle('motion', motion);
+    $('modeTouch').classList.toggle('active', !motion);
+    $('modeMotion').classList.toggle('active', motion);
+    $('airLock').hidden = !motion;
+    $('airLock').setAttribute('aria-pressed', String(airLocked));
+  }
+
+  function savePadMode() {
+    try { localStorage.setItem(PAD_MODE_KEY, padMode); } catch (err) { /* private mode */ }
+  }
+
+  /**
+   * Switches to motion mode. `fromTap` must be true when called from a tap: iOS only shows its
+   * motion permission prompt for a request made synchronously inside a user gesture, which is why
+   * requestPermission is the first thing that can run here - before anything that awaits.
+   */
+  async function enableMotion(fromTap) {
+    if (padMode === 'motion') return;
+    showPanel(null);
+
+    // Fresh diagnostics for this attempt, so a failure never reports an earlier session's numbers.
+    motionEvents = 0;
+    motionSamples = 0;
+    motionSourceName = 'none';
+
+    if (!window.isSecureContext) {
+      if (fromTap) showSecurePanel();
+      return;
+    }
+
+    const LegacyMotion = window.DeviceMotionEvent;
+    const hasGenericSensors = typeof window.Gyroscope === 'function' && typeof window.Accelerometer === 'function';
+    motionError = '';
+
+    if (LegacyMotion && typeof LegacyMotion.requestPermission === 'function') {
+      // iOS: an explicit prompt, which only appears in response to a tap.
+      if (!fromTap) return;
+      let answer = 'denied';
+      try { answer = await LegacyMotion.requestPermission(); } catch (err) { motionError = String(err); }
+      motionPermission = answer;
+      if (answer !== 'granted') {
+        showMotionProblem('denied-ios');
+        return;
+      }
+    } else {
+      // Chromium never prompts for sensors: they are allowed unless blocked in site settings, and
+      // blocked ones simply stay silent. Asking first turns that silence into a clear answer.
+      motionPermission = await querySensorPermission();
+      if (motionPermission === 'denied') {
+        showMotionProblem('denied');
+        return;
+      }
+    }
+
+    if (!LegacyMotion && !hasGenericSensors) {
+      showMotionProblem('unsupported');
+      return;
+    }
+
+    gyro.reset();
+
+    motionSource = null;
+    if (hasGenericSensors) {
+      try {
+        motionSource = startGenericSensors();
+      } catch (err) {
+        motionError = (err && err.name) || String(err);
+      }
+    }
+    if (!motionSource) motionSource = startDeviceMotion();
+
+    padMode = 'motion';
+    paintPadMode();
+    savePadMode();
+    watchMotion();
+  }
+
+  function disableMotion() {
+    if (motionSource) motionSource.stop();
+    motionSource = null;
+    clearTimeout(motionWatch);
+    clearTimeout(airTimer);
+    airTimer = null;
+    airLocked = false;
+    setAirActive(false);
+    padMode = 'touch';
+    paintPadMode();
+    savePadMode();
+  }
+
+  /**
+   * The panel that stands in for the pad when motion mode cannot start: either the move to the
+   * secure connection, or why the sensors are not delivering and what to do about it.
+   * `panel` is { title, text, details, action: 'handoff' | 'retry' | null, actionLabel }, or null.
+   */
+  let panelAction = null;
+
+  function showPanel(panel) {
+    const show = panel !== null;
+    $('securePanel').hidden = !show;
+    builtInPad.hidden = show;
+    if (!show) return;
+
+    $('secureTitle').textContent = panel.title;
+    $('secureText').textContent = panel.text;
+    $('secureDetails').textContent = panel.details || '';
+    $('secureDetails').hidden = !panel.details;
+    panelAction = panel.action;
+    $('secureGo').hidden = !panel.action;
+    $('secureGo').disabled = false;
+    $('secureGo').textContent = panel.actionLabel || '';
+  }
+
+  function showSecurePanel() {
+    const available = securePort > 0;
+    showPanel({
+      title: 'Motion needs a secure connection',
+      text: available
+        ? 'Browsers only share motion sensors with secure (HTTPS) pages. Switching keeps this phone paired; your browser will warn about the PC\'s certificate once - that is expected.'
+        : 'Browsers only share motion sensors with secure (HTTPS) pages, and this PC has its secure port turned off (securePort in config.json).',
+      action: available ? 'handoff' : null,
+      actionLabel: 'Switch to secure connection',
+    });
+  }
+
+  const MOTION_PROBLEMS = {
+    denied: {
+      title: 'Motion sensors are blocked',
+      text: 'This browser is blocking motion sensors for this page, and it will not ask. Allow them in the '
+        + 'site settings - in Chrome, tap the icon at the left of the address bar, then Permissions (or '
+        + 'Site settings) → Motion sensors → Allow - then try again.',
+    },
+    'denied-ios': {
+      title: 'Motion access was not allowed',
+      text: 'Safari remembers that answer until the tab is closed. Close this tab, open the page again, '
+        + 'tap Motion, and choose Allow.',
+    },
+    unsupported: {
+      title: 'No motion sensors in this browser',
+      text: 'This browser does not give web pages access to motion sensors. Chrome on Android and Safari '
+        + 'on iPhone both do.',
+    },
+    silent: {
+      title: 'No motion data arrived',
+      text: 'The browser accepted the request but sent no readings. Check that motion sensors are allowed '
+        + 'for this site (Chrome: icon at the left of the address bar → Permissions → Motion sensors), and '
+        + 'that battery saver is not suspending sensors, then try again.',
+    },
+    incomplete: {
+      title: 'The gyroscope is not reporting',
+      text: 'Motion readings arrived without rotation data. The phone may have an accelerometer but no '
+        + 'gyroscope, or the browser is withholding it.',
+    },
+  };
+
+  function showMotionProblem(kind) {
+    const problem = MOTION_PROBLEMS[kind] || MOTION_PROBLEMS.silent;
+    // The raw facts, so a report of "it doesn't work" can say which of these it was.
+    const details = [
+      'source=' + motionSourceName,
+      'events=' + motionEvents,
+      'readings=' + motionSamples,
+      'permission=' + motionPermission,
+      'generic=' + (typeof window.Gyroscope === 'function'),
+      'devicemotion=' + Boolean(window.DeviceMotionEvent),
+    ].join(' ') + (motionError ? ' error=' + motionError : '');
+
+    showPanel({
+      title: problem.title,
+      text: problem.text,
+      details: details,
+      action: kind === 'unsupported' ? null : 'retry',
+      actionLabel: 'Try again',
+    });
+  }
+
+  $('modeTouch').addEventListener('click', () => {
+    showPanel(null);
+    if (padMode === 'motion') disableMotion();
+  });
+  $('modeMotion').addEventListener('click', () => { enableMotion(true); });
+
+  $('airLock').addEventListener('click', () => {
+    airLocked = !airLocked;
+    if (airLocked) {
+      if (pointers.size === 0) setAirActive(true);
+    } else if (pointers.size === 0) {
+      clearTimeout(airTimer);
+      airTimer = null;
+      setAirActive(false);
+    }
+    paintPadMode();
+  });
+
+  $('secureCancel').addEventListener('click', () => showPanel(null));
+
+  $('secureGo').addEventListener('click', () => {
+    if (panelAction === 'retry') {
+      // Runs inside this tap, so iOS can show its permission prompt again.
+      enableMotion(true);
+      return;
+    }
+    if (panelAction !== 'handoff' || !securePort) return;
+    $('secureGo').disabled = true;
+    link.sendJson({ t: 'secureHandoff' });
+  });
+
+  // The host minted a one-time pairing token: open the secure origin with it, straight into motion
+  // mode. The token rides in the fragment, which never leaves the browser.
+  link.on('secureHandoff', (message) => {
+    if (!message.token || !securePort) return;
+    location.href = 'https://' + location.hostname + ':' + securePort + '/#p=' + message.token + '&mode=motion';
+  });
+
+  /** Called once connected state is known: brings back motion mode if it was on, or was asked for. */
+  function restorePadMode(requested) {
+    let saved = null;
+    try { saved = localStorage.getItem(PAD_MODE_KEY); } catch (err) { /* private mode */ }
+    if (!requested && saved !== 'motion') return;
+
+    if (requested) selectTab('pad', { restoring: true });
+
+    const needsTap = window.DeviceMotionEvent && typeof window.DeviceMotionEvent.requestPermission === 'function';
+    if (window.isSecureContext && needsTap) {
+      toast('Tap Motion to turn on the air mouse');
+    } else if (window.isSecureContext) {
+      enableMotion(false);
+    }
+  }
 
   /**
    * Ratio of screen distance to pad distance.
@@ -1454,6 +1959,13 @@
         dragLocked = false;
         pad.classList.remove('dragging');
       }
+
+      // Hands-free pointing must not resume by itself when the phone comes back out of a pocket.
+      clearTimeout(airTimer);
+      airTimer = null;
+      airLocked = false;
+      builtInPad.classList.remove('pointing');
+      paintPadMode();
       return;
     }
 

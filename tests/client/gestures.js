@@ -207,7 +207,7 @@ const sandbox = {
     clear() { this._m.clear(); },
   },
   navigator: { platform: 'test', userAgent: 'test' },
-  location: { protocol: 'http:', host: 'localhost:8787', hash: '', pathname: '/' },
+  location: { protocol: 'http:', host: 'localhost:8787', hostname: 'localhost', hash: '', pathname: '/' },
   history: { replaceState() {} },
   fetch: () => Promise.reject(new Error('no network in harness')),
   Image: function () { return { src: '', alt: '' }; },
@@ -217,10 +217,17 @@ const sandbox = {
 };
 sandbox.window = sandbox;
 sandbox.globalThis = sandbox;
-sandbox.addEventListener = () => {};
+// Window-level listeners (devicemotion, online, pageshow), kept so scenarios can fire them.
+const windowListeners = new Map();
+sandbox.addEventListener = (type, fn) => {
+  if (!windowListeners.has(type)) windowListeners.set(type, new Set());
+  windowListeners.get(type).add(fn);
+};
+sandbox.removeEventListener = (type, fn) => { if (windowListeners.has(type)) windowListeners.get(type).delete(fn); };
+const fireWindow = (type, event) => { for (const fn of windowListeners.get(type) || []) fn(event); };
 
 vm.createContext(sandbox);
-for (const file of ['protocol.js', 'motion.js', 'app.js']) {
+for (const file of ['protocol.js', 'motion.js', 'airmouse.js', 'app.js']) {
   vm.runInContext(fs.readFileSync(path.join(ROOT, file), 'utf8'), sandbox, { filename: file });
 }
 
@@ -504,6 +511,9 @@ async function main() {
     `cached=${JSON.parse(sandbox.localStorage.getItem('simpleremote.config')).layouts[0].label} tab=${sandbox.localStorage.getItem('simpleremote.tab')}`]);
   hostLayouts = FIXTURE_LAYOUTS;
 
+  // The app's own live socket, before the transport scenarios below replace the global.
+  const appSocket = socket;
+
   // The transport, driven directly with a controllable clock.
   const creds = { deviceId: 'd', token: 't', name: 'test' };
   let clock = 50000;
@@ -671,6 +681,200 @@ async function main() {
   const readX = brisk.frames.filter((f) => f.t <= 500).reduce((s, f) => s + (f.delta ? f.delta.dx : 0), 0);
   const lagMs = (0.8 * 500 - readX) / 0.8;
   results.push(['lag at 800px/s', `under40ms=${lagMs < 40}`, 'expect under40ms=true', `lag=${lagMs.toFixed(1)}ms`]);
+
+  // ---- air mouse ----------------------------------------------------------------
+
+  const { GyroPointer } = sandbox.AirMouse;
+  const G = 9.81;
+
+  /** Runs a GyroPointer for durationMs of constant rotation (°/s) with gravity along `up`. */
+  function turn(up, rate, durationMs, jitter) {
+    const gyroPointer = new GyroPointer();
+    let last = null;
+    for (let t = 0; t <= durationMs; t += 16) {
+      last = gyroPointer.sample({
+        timeStamp: t,
+        rotationRate: {
+          alpha: rate.alpha + noise(jitter || 0),
+          beta: rate.beta + noise(jitter || 0),
+          gamma: rate.gamma + noise(jitter || 0),
+        },
+        accelerationIncludingGravity: { x: up[0] * G, y: up[1] * G, z: up[2] * G },
+      });
+    }
+    return last;
+  }
+
+  // 25. Pointed like a TV remote (lying flat, screen up), turning right is negative rotation about
+  //     the axis through the screen. The cursor goes right, and only right.
+  const flatTurn = turn([0, 0, 1], { alpha: -30, beta: 0, gamma: 0 }, 500);
+  results.push(['air: flat turn right', `right=${flatTurn.x > 10} level=${Math.abs(flatTurn.y) < 0.5}`,
+    'expect right=true level=true', `x=${flatTurn.x.toFixed(1)}° y=${flatTurn.y.toFixed(1)}°`]);
+
+  // 26. The same turn with the phone held upright like a camera is rotation about the long edge
+  //     instead. Projecting onto gravity must give the same cursor direction.
+  const uprightTurn = turn([0, 1, 0], { alpha: 0, beta: 0, gamma: -30 }, 500);
+  results.push(['air: upright same way', `right=${uprightTurn.x > 10} level=${Math.abs(uprightTurn.y) < 0.5}`,
+    'expect right=true level=true', `x=${uprightTurn.x.toFixed(1)}° y=${uprightTurn.y.toFixed(1)}°`]);
+
+  // 27. Tilting the pointing end up moves the cursor up (screen y decreases).
+  const tiltUp = turn([0, 0, 1], { alpha: 0, beta: 20, gamma: 0 }, 500);
+  results.push(['air: tilt up', `up=${tiltUp.y < -5} still=${Math.abs(tiltUp.x) < 0.5}`,
+    'expect up=true still=true', `x=${tiltUp.x.toFixed(1)}° y=${tiltUp.y.toFixed(1)}°`]);
+
+  // 28. A hand is never still: ±1 °/s of tremor on every axis must not creep the cursor.
+  const tremor = turn([0, 0.3, 0.95], { alpha: 0, beta: 0, gamma: 0 }, 2000, 1);
+  results.push(['air: tremor ignored', `still=${Math.hypot(tremor.x, tremor.y) < 0.2}`, 'expect still=true',
+    `drift=${Math.hypot(tremor.x, tremor.y).toFixed(3)}°`]);
+
+  // App integration. Deliver a config advertising a secure port first.
+  appSocket.onmessage({ data: JSON.stringify({
+    t: 'config', hostName: 'TEST', shortcuts: [], layouts: FIXTURE_LAYOUTS, securePort: 8788,
+    pointer: { sensitivity: 0.55, acceleration: 0.4, maxSpeed: 3, scrollSpeed: 1,
+               naturalScroll: true, tapHoldMs: 200, screenWidth: 1920, screenHeight: 1080, airSensitivity: 1 },
+  }) });
+
+  // 29. On plain HTTP, Motion explains the secure switch instead of silently doing nothing; the
+  //     switch asks the host for a handoff token and opens the HTTPS origin with it.
+  sandbox.isSecureContext = false;
+  byId('modeMotion').click();
+  const panelShown = !byId('securePanel').hidden && byId('pad').hidden;
+  reset();
+  byId('secureGo').click();
+  const askedHandoff = sent.some((f) => f.kind === 'text' && JSON.parse(f.data).t === 'secureHandoff');
+  appSocket.onmessage({ data: JSON.stringify({ t: 'secureHandoff', token: 'HANDOFF123' }) });
+  results.push(['air: insecure → handoff', `panel=${panelShown} asked=${askedHandoff}`, 'expect panel=true asked=true',
+    sandbox.location.href || '(no navigation)']);
+  results.push(['air: handoff url', sandbox.location.href, 'expect https://localhost:8788/#p=HANDOFF123&mode=motion', '']);
+  byId('secureCancel').click();
+
+  // Secure page with a gyroscope from here on.
+  sandbox.isSecureContext = true;
+  sandbox.DeviceMotionEvent = function DeviceMotionEvent() {};
+  byId('modeMotion').click();
+  await waitTicks();
+
+  const motionEvent = (alpha) => ({
+    timeStamp: now,
+    rotationRate: { alpha: alpha, beta: 0, gamma: 0 },
+    accelerationIncludingGravity: { x: 0, y: 0, z: G },
+  });
+  const spin = (frames, alpha) => {
+    for (let i = 0; i < frames; i++) { fireWindow('devicemotion', motionEvent(alpha)); pumpFrames(1); }
+  };
+  spin(1, 0); // proves sensors work, before the no-data watchdog looks
+
+  results.push(['air: motion mode on', `motion=${byId('pad').classList.contains('motion')} listening=${(windowListeners.get('devicemotion') || new Set()).size}`,
+    'expect motion=true listening=1', '']);
+
+  // 30. Motion mode with no finger and no lock: turning the phone does nothing.
+  await new Promise((r) => setTimeout(r, 320));
+  reset();
+  spin(20, -60);
+  results.push(['air: idle ignores turns', `moves=${decode(sent).filter((e) => e.op === 'move').length}`, 'expect moves=0', '']);
+
+  // 31. A tap clicks - and the jolt of tapping does not move the cursor first.
+  reset();
+  pointer('pointerdown', 150, 300);
+  spin(2, -80);
+  pointer('pointerup', 150, 300);
+  await new Promise((r) => setTimeout(r, 320));
+  pumpFrames(1);
+  const tapEvents = decode(sent);
+  results.push(['air: tap clicks still', `${buttons(tapEvents)} moves=${tapEvents.filter((e) => e.op === 'move').length}`,
+    'expect 0v 0^ moves=0', '']);
+
+  // 32. Holding the pad and turning right moves the cursor right, and releasing does not click.
+  reset();
+  pointer('pointerdown', 150, 300);
+  await new Promise((r) => setTimeout(r, 200)); // past the hold threshold
+  spin(40, -60);
+  advance(20);
+  pointer('pointerup', 150, 300);
+  pumpFrames(2);
+  const holdEvents = decode(sent);
+  const holdDx = holdEvents.filter((e) => e.op === 'move').reduce((s, e) => s + e.dx, 0);
+  const holdDy = holdEvents.filter((e) => e.op === 'move').reduce((s, e) => s + e.dy, 0);
+  results.push(['air: hold and turn', `right=${holdDx > 50} buttons=${buttons(holdEvents) || 'none'}`,
+    'expect right=true buttons=none', `dx=${holdDx} dy=${holdDy}`]);
+
+  // 33. Lock points hands-free; unlocking stops it.
+  await new Promise((r) => setTimeout(r, 320));
+  byId('airLock').click();
+  reset();
+  spin(30, 60);
+  const lockedDx = decode(sent).filter((e) => e.op === 'move').reduce((s, e) => s + e.dx, 0);
+  byId('airLock').click();
+  pumpFrames(1); // unlocking sends the tail of the motion already made; that is not what we measure
+  reset();
+  spin(20, 60);
+  const unlockedMoves = decode(sent).filter((e) => e.op === 'move').length;
+  results.push(['air: lock and unlock', `locked=${lockedDx < -50} unlocked=${unlockedMoves}`,
+    'expect locked=true unlocked=0', `dx=${lockedDx}`]);
+
+  // 34. Back to Touch: the sensor listener is released and the pad drives the cursor again.
+  byId('modeTouch').click();
+  results.push(['air: touch mode restores', `motion=${byId('pad').classList.contains('motion')} listening=${(windowListeners.get('devicemotion') || new Set()).size}`,
+    'expect motion=false listening=0', '']);
+
+  // 35. Chromium never prompts for sensors - a blocked site just gets silence. Asking the Permissions
+  //     API first turns that into a specific explanation instead of "no data".
+  sandbox.navigator.permissions = { query: ({ name }) => Promise.resolve({ state: name === 'gyroscope' ? 'denied' : 'granted' }) };
+  byId('modeMotion').click();
+  await waitTicks(); await waitTicks();
+  results.push(['air: blocked permission',
+    `motion=${byId('pad').classList.contains('motion')} title=${byId('secureTitle').textContent}`,
+    'expect motion=false title=Motion sensors are blocked', byId('secureDetails').textContent]);
+
+  // 36. With the Generic Sensor API present it is preferred, and its rad/s readings drive the same
+  //     pointer: turning right while holding moves the cursor right.
+  class FakeSensor {
+    constructor() { this.listeners = {}; this.x = null; this.y = null; this.z = null; this.timestamp = null; this.started = false; }
+    addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
+    start() { this.started = true; }
+    stop() { this.started = false; }
+    emit(type, event) { for (const fn of this.listeners[type] || []) fn(event); }
+  }
+  const sensors = { gyro: null, accel: null };
+  sandbox.Gyroscope = class extends FakeSensor { constructor() { super(); sensors.gyro = this; } };
+  sandbox.Accelerometer = class extends FakeSensor { constructor() { super(); sensors.accel = this; } };
+  sandbox.navigator.permissions = { query: () => Promise.resolve({ state: 'granted' }) };
+
+  byId('secureGo').click(); // "Try again"
+  await waitTicks(); await waitTicks();
+  const genericReading = (radiansPerSecond) => {
+    sensors.accel.x = 0; sensors.accel.y = 0; sensors.accel.z = G;
+    sensors.gyro.x = 0; sensors.gyro.y = 0; sensors.gyro.z = radiansPerSecond;
+    sensors.gyro.timestamp = now;
+    sensors.gyro.emit('reading');
+  };
+  genericReading(0);
+  results.push(['air: generic sensors used',
+    `motion=${byId('pad').classList.contains('motion')} started=${Boolean(sensors.gyro && sensors.gyro.started && sensors.accel.started)} devicemotion=${(windowListeners.get('devicemotion') || new Set()).size}`,
+    'expect motion=true started=true devicemotion=0', '']);
+
+  await new Promise((r) => setTimeout(r, 320));
+  reset();
+  pointer('pointerdown', 150, 300);
+  await new Promise((r) => setTimeout(r, 200));
+  for (let i = 0; i < 40; i++) { genericReading(-60 / (180 / Math.PI)); pumpFrames(1); }
+  advance(20);
+  pointer('pointerup', 150, 300);
+  pumpFrames(2);
+  const genericDx = decode(sent).filter((e) => e.op === 'move').reduce((s, e) => s + e.dx, 0);
+  results.push(['air: generic hold and turn', `right=${genericDx > 50}`, 'expect right=true', `dx=${genericDx}`]);
+
+  // 37. A sensor that reports permission denied after starting stops motion and says why.
+  await new Promise((r) => setTimeout(r, 320));
+  sensors.gyro.emit('error', { error: { name: 'NotAllowedError', message: 'Permission denied.' } });
+  results.push(['air: sensor error explained',
+    `motion=${byId('pad').classList.contains('motion')} stopped=${!sensors.gyro.started} title=${byId('secureTitle').textContent}`,
+    'expect motion=false stopped=true title=Motion sensors are blocked', byId('secureDetails').textContent]);
+
+  byId('secureCancel').click();
+  delete sandbox.Gyroscope;
+  delete sandbox.Accelerometer;
+  delete sandbox.navigator.permissions;
 
   console.log('');
   let failed = 0;

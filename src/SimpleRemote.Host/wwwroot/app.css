@@ -140,6 +140,80 @@ html, body {
 .pad-hint span { font-size: 12.5px; }
 .pad.used .pad-hint { opacity: 0; }
 
+/* ---------- pointer mode (touch / motion) ---------- */
+
+.mode-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 0;
+  flex: 0 0 auto;
+}
+.seg {
+  display: flex;
+  flex: 1;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 3px;
+}
+.seg-btn {
+  flex: 1;
+  height: 34px;
+  border: none;
+  border-radius: calc(var(--radius) - 3px);
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+}
+.seg-btn.active { background: var(--surface-2); color: var(--text); font-weight: 600; }
+.lock-btn {
+  flex: 0 0 84px;
+  height: 42px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+}
+.lock-btn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #06121f; font-weight: 600; }
+
+.pad .motion-hint { display: none; }
+.pad.motion .touch-hint { display: none; }
+.pad.motion .motion-hint { display: flex; }
+/* Unlike the trackpad hint, this one stays faintly visible: "hold here" is not obvious once learned
+   for touch, and the pad no longer reacts to finger travel. */
+.pad.motion.used .motion-hint { opacity: 0.35; }
+.pad.motion.pointing { border-color: var(--accent); box-shadow: inset 0 0 0 2px var(--accent-dim); }
+
+/* Takes the pad's place while shown (app.js hides the pad), so it gets the same room. */
+.secure-panel {
+  flex: 1 1 auto;
+  margin: 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+  padding: 20px;
+  background: var(--surface);
+  text-align: left;
+}
+.secure-panel[hidden] { display: none; }
+.secure-panel strong { font-size: 15px; }
+.secure-panel span { font-size: 13px; color: var(--muted); line-height: 1.45; }
+.secure-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.secure-details {
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--bg);
+  border-radius: 6px;
+  padding: 6px 8px;
+  word-break: break-word;
+}
+.secure-details[hidden] { display: none; }
+
 .pad-buttons {
   display: flex;
   gap: 8px;

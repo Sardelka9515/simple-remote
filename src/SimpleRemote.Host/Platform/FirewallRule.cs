@@ -24,14 +24,17 @@ public static class FirewallRule
     /// Creates the rule, elevating via UAC. Returns false if the user declines the prompt, which
     /// is a normal outcome and not an error.
     /// </summary>
-    public static bool TryAdd(int port)
+    public static bool TryAdd(params int[] ports)
     {
+        var list = string.Join(",", ports.Where(p => p > 0).Distinct());
+        if (list.Length == 0) return false;
+
         // Remove first so changing the port does not leave a stale rule behind.
         RunNetsh($"advfirewall firewall delete rule name=\"{RuleName}\"", elevated: true, out _);
 
         RunNetsh(
             $"advfirewall firewall add rule name=\"{RuleName}\" dir=in action=allow " +
-            $"protocol=TCP localport={port} profile=private,domain " +
+            $"protocol=TCP localport={list} profile=private,domain " +
             $"program=\"{AutoStart.ExecutablePath}\"",
             elevated: true,
             out var exitCode);

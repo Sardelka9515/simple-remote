@@ -77,17 +77,42 @@ public sealed class DeviceStore
         lock (_gate)
         {
             var device = _devices.FirstOrDefault(d => d.Id == deviceId);
-            if (device is null) return null;
-
-            if (!CryptographicOperations.FixedTimeEquals(
-                    Convert.FromHexString(device.TokenHash),
-                    SHA256.HashData(Encoding.UTF8.GetBytes(token))))
-                return null;
+            if (device is null || !TokenMatches(device, token)) return null;
 
             device.LastSeenUtc = _time.GetUtcNow();
             return device;
         }
     }
+
+    /// <summary>
+    /// Re-validates a device's current credential and rotates its token in place, rather than
+    /// creating a new record.
+    ///
+    /// A phone that already holds a working pairing only ever rescans the QR deliberately - after
+    /// waking the pairing window, say - and that should refresh its own row, not add a duplicate
+    /// "iPhone" entry next to the one it already had.
+    /// </summary>
+    public IssuedDevice? Reauthenticate(string? deviceId, string? token)
+    {
+        if (string.IsNullOrEmpty(deviceId) || string.IsNullOrEmpty(token)) return null;
+
+        lock (_gate)
+        {
+            var device = _devices.FirstOrDefault(d => d.Id == deviceId);
+            if (device is null || !TokenMatches(device, token)) return null;
+
+            var newToken = PairingTokenSource.Base64Url(RandomNumberGenerator.GetBytes(32));
+            device.TokenHash = Hash(newToken);
+            device.LastSeenUtc = _time.GetUtcNow();
+            SaveLocked();
+            return new IssuedDevice(device.Id, newToken);
+        }
+    }
+
+    private static bool TokenMatches(DeviceRecord device, string token) =>
+        CryptographicOperations.FixedTimeEquals(
+            Convert.FromHexString(device.TokenHash),
+            SHA256.HashData(Encoding.UTF8.GetBytes(token)));
 
     public bool Revoke(string deviceId)
     {

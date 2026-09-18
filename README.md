@@ -17,6 +17,7 @@ Phone browser  ──WebSocket──►  Kestrel  ──►  receive loop  ─�
 | | |
 |---|---|
 | **Trackpad** | Drag to move, tap to click, two-finger tap for right click, two-finger drag to scroll with momentum, tap-and-a-half to drag. A scroll strip down the right edge scrolls with one thumb. Dedicated L/M/R buttons. |
+| **Air mouse** | Switch the trackpad to Motion and point the phone like a TV remote: hold the pad and turn to move the cursor, or Lock to point hands-free. Needs the secure connection (one tap to switch). |
 | **Keyboard** | Opening the tab raises the phone keyboard straight away. Type in any language (Unicode, so emoji and any layout work), plus arrows, function keys, and latching Ctrl/Alt/Shift/Win for real shortcuts. |
 | **Media** | Now-playing title, artist and album art from whatever is playing, with transport controls, a scrub bar, and a system volume slider. |
 | **Shortcuts** | Your own buttons — key combos or app/URL launches — defined in `config.json`. |
@@ -134,6 +135,7 @@ Only SHA-256 hashes of device tokens are stored, in
 ```json
 {
   "port": 8787,
+  "securePort": 8788,
   "pointer": {
     "sensitivity": 0.55,
     "acceleration": 0.4,
@@ -143,7 +145,8 @@ Only SHA-256 hashes of device tokens are stored, in
     "smoothScroll": true,
     "tapHoldMs": 200,
     "networkSmoothing": true,
-    "maxNetworkBufferMs": 60
+    "maxNetworkBufferMs": 60,
+    "airSensitivity": 1.0
   },
   "shortcuts": [
     { "id": "netflix", "label": "Netflix", "icon": "🎬",
@@ -412,6 +415,39 @@ would produce stray sideways scrolling.
 If some older application integer-divides the wheel delta by 120 and so never scrolls at all, set
 `pointer.smoothScroll` to `false` to get the quantised behaviour back.
 
+### Air mouse
+
+On the Touchpad tab, switch **Touch → Motion**. The pad becomes a clutch:
+
+- **Hold the pad and turn the phone** to move the cursor; let go to reposition your hand, like
+  lifting a mouse. Nothing drifts while you are not holding.
+- **Tap** to click. Pointing pauses the instant a finger lands, so the jolt of tapping never nudges
+  the cursor off its target. Tap-and-a-half then hold is an air *drag*.
+- **Lock** points hands-free until you unlock, background the page, or tap (after which it resumes
+  once the phone settles).
+- Two fingers still scroll.
+
+It works held flat and pointed like a TV remote, or upright like a camera. The gyroscope reports
+rotation about the phone's own axes, and which axis means "turn left" depends on the grip, so
+`wwwroot/airmouse.js` projects the rotation onto gravity: rotation about the vertical is always
+left/right, and rotation about the phone's right edge (made horizontal) is always up/down. Angular
+velocity is used rather than absolute orientation, which leans on the magnetometer and drifts or
+jumps near speakers and laptops. A soft dead zone of 1.5 °/s absorbs hand tremor.
+
+The integrated angle goes into the **same smoothing path as a finger** — 1€ filter, frame
+resampling, frame stamps and host playout all apply. At `airSensitivity` 1.0, about 35° of turn
+crosses the desktop's width; the Speed slider applies too.
+
+**It needs HTTPS.** Browsers only deliver motion sensor events to secure pages: Chrome has silently
+not fired them over plain HTTP since 2019, and iOS will not show its motion permission prompt
+either. So the host also listens on `securePort` (8788) with a self-signed certificate it generates
+on first run (`%APPDATA%\SimpleRemote\https.pfx`, ECDSA P-256, naming every LAN address). On plain
+HTTP, tapping Motion offers **Switch to secure connection**: the host issues a one-time token and
+the phone opens `https://<pc>:8788/` already paired (listed as "… (secure)") and in Motion mode.
+The browser warns about the certificate once — a LAN address can never get a publicly trusted
+certificate — and the certificate is reused afterwards so the accepted exception keeps working. It
+is regenerated only when it nears expiry or the PC's addresses change.
+
 ## Why it feels responsive
 
 - **Motion is coalesced to one packet per animation frame.** Sending every `touchmove` (90–120 Hz
@@ -446,9 +482,17 @@ What that means in practice:
 Set `useHttps` and `certPath` in `config.json` to move to TLS; the client derives its WebSocket
 scheme from the page, so nothing else needs changing.
 
-### Two things plain HTTP costs you
+The **secure port** (`securePort`, 8788 by default, `0` to disable) serves the same UI over HTTPS
+with a self-signed certificate, for features browsers reserve for secure pages — see *Air mouse*.
+Plain HTTP stays the default for pairing so scanning a code never starts with a certificate
+warning. If the secure port cannot start (in use, or no certificate), the remote still comes up on
+plain HTTP and the Motion button explains what is missing.
 
-Both need a *secure context*, so they only work over HTTPS (or on `localhost`):
+### What plain HTTP costs you
+
+These need a *secure context*, so they only work on the secure port (or on `localhost`):
+
+- **The air mouse** (motion sensors).
 
 - **Reading the phone clipboard automatically.** Pushing PC → phone works fine; phone → PC needs
   you to paste into the box manually. The UI says so rather than offering a button that fails.
@@ -474,6 +518,28 @@ still usually honour hardware media keys, which is what Simple Remote falls back
 honour neither cannot be controlled.
 
 **Port 8787 is in use.** Change `port` in `config.json` and restart.
+
+**Switch to secure connection opens a page that never loads.** The firewall rule predates the secure
+port and only allows 8787. Press *Fix firewall* in the pairing window again; it now opens both ports.
+
+**Motion will not start.** The panel that replaces the pad says why, with a line of raw details
+(`source`, `events`, `readings`, `permission`, any sensor `error`) worth quoting in a bug report.
+The usual causes:
+
+- *Motion sensors are blocked* — Chrome never prompts for sensors; a site that has them blocked just
+  receives nothing. Tap the icon at the left of the address bar → Permissions → Motion sensors →
+  Allow, then **Try again**.
+- *Motion access was not allowed* (iPhone) — Safari remembers a denial until the tab is closed.
+  Close the tab, reopen the page and tap Motion again.
+- *No motion data arrived* — the browser accepted the request but sent nothing for three seconds.
+  Battery saver modes can suspend sensors.
+
+Chromium browsers are read through the Generic Sensor API (`Gyroscope` + `Accelerometer`), which
+reports failures explicitly; everything else, and Chromium as a fallback, through `devicemotion`.
+
+**The air mouse moves the wrong way on one phone.** Gravity is reported with opposite signs by
+different browsers; `airmouse.js` assumes iOS inverts it. If a browser disagrees, that assumption is
+the place to fix.
 
 ## Layout
 

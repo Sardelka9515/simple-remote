@@ -108,6 +108,22 @@ public sealed class ConfigMessage
 
     public PointerInfo Pointer { get; set; } = new();
     public string HostName { get; set; } = Environment.MachineName;
+
+    /// <summary>
+    /// HTTPS port the phone can switch to for features browsers reserve for secure pages (the air
+    /// mouse), or 0 when there is none.
+    /// </summary>
+    public int SecurePort { get; set; }
+}
+
+/// <summary>
+/// A single-use token for re-pairing this phone on the secure port without scanning a QR code.
+/// Browser storage is per origin, so the HTTPS page starts out knowing nothing about the pairing.
+/// </summary>
+public sealed class SecureHandoffMessage
+{
+    public string T => "secureHandoff";
+    public string? Token { get; set; }
 }
 
 public sealed class LayoutInfo
@@ -174,4 +190,6 @@ public sealed class PointerInfo
     public int ScreenWidth { get; set; }
 
     public int ScreenHeight { get; set; }
+
+    public double AirSensitivity { get; set; }
 }

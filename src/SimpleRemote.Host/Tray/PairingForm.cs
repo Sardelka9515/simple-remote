@@ -291,7 +291,12 @@ public sealed class PairingForm : Form
 
     private void UpdateStatus()
     {
-        var parts = new List<string> { $"Listening on port {_host.Port}" };
+        var parts = new List<string>
+        {
+            _host.SecurePort > 0
+                ? $"Listening on port {_host.Port} (secure {_host.SecurePort})"
+                : $"Listening on port {_host.Port}",
+        };
 
         if (!FirewallRule.Exists())
             parts.Add("firewall rule not found - tap Fix firewall if the phone cannot connect");
@@ -311,7 +316,7 @@ public sealed class PairingForm : Form
 
     private void FixFirewall()
     {
-        var added = FirewallRule.TryAdd(_host.Port);
+        var added = FirewallRule.TryAdd(_host.Port, _host.SecurePort);
         MessageBox.Show(this,
             added
                 ? "Firewall rule added for private and domain networks."
